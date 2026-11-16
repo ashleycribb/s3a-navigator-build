@@ -1,0 +1,5 @@
+source: https://github.com/ashleycribb/s3a-Navigator
+commit: 235111c6fe10f2d63f3476bf5e3d19b4c7089415
+
+The Rust core is vendored from this pin in build step 2, not in step 1.
+The former repository URL https://github.com/ashleycribb/s3a-Kite redirects here.

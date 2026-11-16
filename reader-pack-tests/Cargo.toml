@@ -1,0 +1,7 @@
+[package]
+name = "reader-pack-tests"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Out-of-workspace s3a-reader pack tests (AT-38, AT-39, AT-43, AT-63, AT-165). Not a reader-workspace member."
+publish = false

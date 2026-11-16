@@ -1,0 +1,7 @@
+[package]
+name = "kite-pack-tests"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Out-of-workspace pack-linking tests (DD-121). Path dependency on s3a-pack-kite is added when the pack exists."
+publish = false
