@@ -1,6 +1,6 @@
 # S3A Navigator — test-first build plan
 
-Local work for the pack specified in `SPEC.md` v24.2. Product names in the tree stay `s3a-kite` / `S3A_KITE_*` until the dedicated rename step. The GitHub fork is [ashleycribb/s3a-Navigator](https://github.com/ashleycribb/s3a-Navigator) (the former `s3a-Kite` URL redirects); vendor pin `235111c6fe10f2d63f3476bf5e3d19b4c7089415`.
+Local work for the pack specified in `SPEC.md` v24.3. Product names in the tree stay `s3a-kite` / `S3A_KITE_*` until the dedicated rename step. The GitHub fork is [ashleycribb/s3a-Navigator](https://github.com/ashleycribb/s3a-Navigator) (the former `s3a-Kite` URL redirects); vendor pin `235111c6fe10f2d63f3476bf5e3d19b4c7089415`.
 
 ## Rules
 
@@ -58,7 +58,7 @@ Also apply Ashley's 2026-11-16 reversal of Q-05 / DD-35: add CJK (Noto Sans SC, 
 
 ### Step 5 — Host and fetch hardening minors
 
-F-04 (`fetch_error` vocabulary, DNS/mid-body/decode, timeout starts before DNS), F-05 (consent-file write and bootstrap-create failures), F-06 (hook re-arm), F-07 (sidecar lock `lstat`), F-09 (loopback definition for `--bind`), F-10 (keep-alive idle vs `--handle-idle-secs`), F-11 (privileged-test skip-and-report).
+F-04 (`fetch_error` vocabulary, DNS/mid-body/decode, timeout starts before DNS), F-05 (consent-file write and bootstrap-create failures), F-06 (hook re-arm), F-07 (sidecar lock `lstat`), F-09 (loopback definition for `--bind`), F-10 (keep-alive idle vs `--handle-idle-secs`), F-11 (privileged-test skip-and-report). Applied in SPEC v24.3 (wording and AT text only; no host or engine implementation in this step).
 
 **ATs:** AT-103, AT-183, AT-151, AT-169, AT-229, AT-198, AT-208, AT-230, AT-231, AT-226, AT-174.
 
@@ -90,7 +90,7 @@ YAML front matter and page HTML/Markdown fail closed above an implementation nes
 
 §11 item 5, after step 6 (F-13). Select is closer-read only; download is inclusion; deselect is logged without snapshot, fingerprint, reason, or corpus entry (DD-154).
 
-**ATs:** AT-26, AT-27, AT-31, AT-54, AT-55, AT-61, AT-82, AT-83, AT-88, AT-89, AT-94, AT-102–AT-106, AT-126, AT-186, AT-209, AT-212–AT-215, AT-221, AT-227, AT-228, AT-234, AT-235, and the other select/download ATs read under the v24.2 §7 rule.
+**ATs:** AT-26, AT-27, AT-31, AT-54, AT-55, AT-61, AT-82, AT-83, AT-88, AT-89, AT-94, AT-102–AT-106, AT-126, AT-186, AT-209, AT-212–AT-215, AT-221, AT-227, AT-228, AT-234, AT-235, and the other select/download ATs read under the v24.3 §7 rule.
 
 ### Step 11 — LRS client, retries, identity, actor homepage
 
