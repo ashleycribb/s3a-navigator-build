@@ -1,6 +1,6 @@
 # S3A Navigator — test-first build plan
 
-Local work for the pack specified in `SPEC.md` v24.1. Product names in the tree stay `s3a-kite` / `S3A_KITE_*` until the dedicated rename step. The GitHub fork is [ashleycribb/s3a-Navigator](https://github.com/ashleycribb/s3a-Navigator) (the former `s3a-Kite` URL redirects); vendor pin `235111c6fe10f2d63f3476bf5e3d19b4c7089415`.
+Local work for the pack specified in `SPEC.md` v24.2. Product names in the tree stay `s3a-kite` / `S3A_KITE_*` until the dedicated rename step. The GitHub fork is [ashleycribb/s3a-Navigator](https://github.com/ashleycribb/s3a-Navigator) (the former `s3a-Kite` URL redirects); vendor pin `235111c6fe10f2d63f3476bf5e3d19b4c7089415`.
 
 ## Rules
 
@@ -44,15 +44,17 @@ Vendor the Rust core from [ashleycribb/s3a-Navigator](https://github.com/ashleyc
 
 ### Step 3 — Pack crate skeleton
 
-Create `s3a-pack-kite` (`crates/s3a-pack-kite`, not a workspace member until it exists and is ready to join, per DD-121). `KiteContext`, error type, crate types. No CJK/emoji font packs in the first build (Q-05, DD-35).
+Create `s3a-pack-kite` (`crates/s3a-pack-kite`, not a workspace member until it exists and is ready to join, per DD-121). `KiteContext`, error type, crate types. At the time of this step, Q-05 excluded CJK/emoji packs from the first build; that answer was reversed in step 4 (SPEC v24.2, DD-35).
 
 **ATs:** AT-01, AT-42.
 
-### Step 4 — Round-24 wording and report minors (no engine API yet)
+### Step 4 — Round-24 wording and report minors, plus required CJK and emoji UA fonts (no engine API yet)
 
 Apply F-01, F-02, F-03, F-08, F-12 spec/test alignments: hyper-tile invalid-header row in the total derivation (F-01); `signature_known_signer` cut-off wording (F-02); `open_verified` / AT-211 quarantine consistency (F-03); manifest tile-78 / seal-failed display (F-08); the F-12 nits (viewer_only list, `path_escape` when-text, step 2 "usable" snapshot, AT-46 addon wording, `addon_missing` vs `write_failed` / `lock_failed` order).
 
-**ATs:** AT-165 (invalid-header fixture), AT-211, AT-09, AT-10, AT-35, AT-65, AT-90, AT-46.
+Also apply Ashley's 2026-11-16 reversal of Q-05 / DD-35: add CJK (Noto Sans SC, SIL OFL 1.1) and emoji (monochrome Noto Emoji, SIL OFL 1.1) as required UA fonts, with license files and NOTICE entries. Color-emoji paint is not claimed. Size impact on pack / `max_open_bytes` / Pixel 9 budgets stays a Q-06 / Q-17 measurement item (no invented numbers). No crate rename. No open/render/engine API in this step.
+
+**ATs:** AT-165 (invalid-header fixture text), AT-211, AT-09, AT-10, AT-35, AT-65, AT-90, AT-46, and AT-42 / AT-49 updated for the required CJK and emoji names.
 
 ### Step 5 — Host and fetch hardening minors
 
@@ -88,7 +90,7 @@ YAML front matter and page HTML/Markdown fail closed above an implementation nes
 
 §11 item 5, after step 6 (F-13). Select is closer-read only; download is inclusion; deselect is logged without snapshot, fingerprint, reason, or corpus entry (DD-154).
 
-**ATs:** AT-26, AT-27, AT-31, AT-54, AT-55, AT-61, AT-82, AT-83, AT-88, AT-89, AT-94, AT-102–AT-106, AT-126, AT-186, AT-209, AT-212–AT-215, AT-221, AT-227, AT-228, AT-234, AT-235, and the other select/download ATs read under the v24.1 §7 rule.
+**ATs:** AT-26, AT-27, AT-31, AT-54, AT-55, AT-61, AT-82, AT-83, AT-88, AT-89, AT-94, AT-102–AT-106, AT-126, AT-186, AT-209, AT-212–AT-215, AT-221, AT-227, AT-228, AT-234, AT-235, and the other select/download ATs read under the v24.2 §7 rule.
 
 ### Step 11 — LRS client, retries, identity, actor homepage
 
@@ -110,7 +112,7 @@ Lab LRS `https://34.74.163.88.sslip.io/xapi/` (Q-02). Retries: 3 tries, 10 s apa
 
 ### Step 14 — Mobile UniFFI viewer and Pixel 9 measurement
 
-§11 item 6. Phone is viewer-only (DD-45, DD-128). Measure peak RSS, time to first manifest frame, APK size, `max_frame_pixels`, and `max_open_bytes` on Ashley's Pixel 9; set Q-06 and Q-17 from those figures (no invented numbers).
+§11 item 6. Phone is viewer-only (DD-45, DD-128). Measure peak RSS, time to first manifest frame, APK size, `max_frame_pixels`, and `max_open_bytes` on Ashley's Pixel 9, including the size impact of the required Noto Sans SC and monochrome Noto Emoji packs added in step 4; set Q-06 and Q-17 from those figures (no invented numbers).
 
 **ATs:** AT-38, AT-39, AT-41, AT-43, AT-44, AT-63, AT-99, AT-165 (reader crate).
 
