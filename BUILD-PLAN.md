@@ -64,7 +64,9 @@ F-04 (`fetch_error` vocabulary, DNS/mid-body/decode, timeout starts before DNS),
 
 ### Step 6 — F-13 dependency: fd-taking `s3a-engine` snapshot API
 
-**Dependency (do this before the write path).** Add fd-taking `TileWriter` create/append and `seal_archive` in `s3a-engine`, used on the same file description that holds `LOCK_EX`. `/proc/self/fd` and path reopen are forbidden for snapshot and download temps. Engine work stays on a local branch; do not push s3a-storage until Ashley says so.
+**Dependency (do this before the write path).** Add fd-taking `TileWriter` create/append and `seal_archive` in `s3a-engine`, used on the same file description that holds `LOCK_EX`. `/proc/self/fd` and path reopen are forbidden for snapshot and download temps.
+
+F-13 is in https://github.com/ashleycribb/s3a-storage/pull/210 (pending merge). The PR adds `TileWriter::create_from_file` / `open_append_from_file`, `TileWriter::into_file`, and `seal_archive_from_file` on an already-open file description. Those symbols are `cfg`-gated out on wasm32 (no file descriptors; not stubbed). Path-based APIs are unchanged. Do not merge the PR, and do not bump the s3a-storage pin, until Ashley says so.
 
 **ATs:** AT-239.
 
