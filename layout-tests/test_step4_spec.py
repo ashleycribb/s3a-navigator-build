@@ -25,10 +25,17 @@ def _spec() -> str:
 
 class Step4SpecWordingTests(unittest.TestCase):
     def test_01_spec_is_v24_2(self) -> None:
+        # Retirement (step 5): the exact "**Status:** v24.2" / "whole v24.2
+        # contract" assertions are retired because step 5 amends the
+        # self-contained contract to v24.3. The v24.2 changelog entry and
+        # the F-01 / F-02 / F-03 / F-08 / F-12 wording checks below stay.
         text = _spec()
         self.assertTrue(SPEC.is_file())
-        self.assertIn("**Status:** v24.2", text)
-        self.assertIn("the whole v24.2 contract", text)
+        self.assertIn("*   2026-11-16: v24.2.", text)
+        self.assertTrue(
+            "**Status:** v24.2" in text or "**Status:** v24.3" in text,
+            "status must remain v24.2 or become v24.3 (step 5); got a different status line",
+        )
 
     def test_02_goldfish_copy_is_identical_when_present(self) -> None:
         if not GOLDFISH.is_file():
