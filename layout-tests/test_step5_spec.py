@@ -28,10 +28,18 @@ def _contains(test: unittest.TestCase, needle: str, text: str) -> None:
 
 class Step5HostFetchHardeningTests(unittest.TestCase):
     def test_01_spec_is_v24_3(self) -> None:
+        # Retirement (step 7): the exact "**Status:** v24.3" / "whole v24.3
+        # contract" assertions are retired because step 7 amends the
+        # self-contained contract to v24.4. The v24.3 changelog entry and
+        # the F-04 / F-05 / F-06 / F-07 / F-09 / F-10 / F-11 wording checks
+        # below stay.
         text = _spec()
         self.assertTrue(SPEC.is_file())
-        _contains(self, "**Status:** v24.3", text)
-        _contains(self, "the whole v24.3 contract", text)
+        self.assertIn("*   2026-11-16: v24.3.", text)
+        self.assertTrue(
+            "**Status:** v24.3" in text or "**Status:** v24.4" in text,
+            "status must remain v24.3 or become v24.4 (step 7); got a different status line",
+        )
 
     def test_02_goldfish_copy_is_identical_when_present(self) -> None:
         if not GOLDFISH.is_file():

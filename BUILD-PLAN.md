@@ -1,6 +1,6 @@
 # S3A Navigator — test-first build plan
 
-Local work for the pack specified in `SPEC.md` v24.3. Product names in the tree stay `s3a-kite` / `S3A_KITE_*` until the dedicated rename step. The GitHub fork is [ashleycribb/s3a-Navigator](https://github.com/ashleycribb/s3a-Navigator) (the former `s3a-Kite` URL redirects); vendor pin `235111c6fe10f2d63f3476bf5e3d19b4c7089415`. s3a-storage pin `2cf2b45fb1a3375735687252d93a612fb6c9f773` (PR 210 merged 2026-11-17, America/New_York).
+Local work for the pack specified in `SPEC.md` v24.4. Product names in the tree stay `s3a-kite` / `S3A_KITE_*` until the dedicated rename step. The GitHub fork is [ashleycribb/s3a-Navigator](https://github.com/ashleycribb/s3a-Navigator) (the former `s3a-Kite` URL redirects); vendor pin `235111c6fe10f2d63f3476bf5e3d19b4c7089415`. s3a-storage pin `2cf2b45fb1a3375735687252d93a612fb6c9f773` (PR 210 merged 2026-11-17, America/New_York).
 
 ## Rules
 
@@ -74,7 +74,9 @@ F-04 (`fetch_error` vocabulary, DNS/mid-body/decode, timeout starts before DNS),
 
 YAML front matter and page HTML/Markdown fail closed above an implementation nesting limit. Deeply nested YAML, Markdown, and HTML seeds join the AT-71 corpus.
 
-**ATs:** AT-71 (seeds), and a dedicated case if one is added then.
+**Done (2026-11-17, America/New_York).** Applied in SPEC v24.4 (and the identical `/workspace/goldfish/s3a-kite.md` copy). No numeric nesting-depth default is invented; the bound is an implementation limit. A dossier whose front matter exceeds the limit is omitted from the candidate list; `render_page` of a page whose HTML or Markdown exceeds the limit is a page error. Seeds are in `fuzz/corpus/open_and_render/` (`deeply_nested_yaml_front_matter.md`, `deeply_nested_markdown.md`, `deeply_nested_html.html`), each nested 4096 levels (a test-fixture depth, not a SPEC default). Parser/open/render enforcement lands with those later steps and uses these seeds. No new AT number.
+
+**ATs:** AT-71 (seeds).
 
 ### Step 8 — Hyper-tile and Edge manifest / warehouse paint
 

@@ -33,8 +33,10 @@ class Step4SpecWordingTests(unittest.TestCase):
         self.assertTrue(SPEC.is_file())
         self.assertIn("*   2026-11-16: v24.2.", text)
         self.assertTrue(
-            "**Status:** v24.2" in text or "**Status:** v24.3" in text,
-            "status must remain v24.2 or become v24.3 (step 5); got a different status line",
+            "**Status:** v24.2" in text
+            or "**Status:** v24.3" in text
+            or "**Status:** v24.4" in text,
+            "status must remain v24.2, v24.3, or become v24.4 (step 7); got a different status line",
         )
 
     def test_02_goldfish_copy_is_identical_when_present(self) -> None:
