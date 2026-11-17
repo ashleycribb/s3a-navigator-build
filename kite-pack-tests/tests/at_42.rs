@@ -2,10 +2,17 @@
 //! KiteError that names the missing required UA fonts and does not
 //! construct a context that would render with system or host fonts.
 //!
-//! Required UA fonts (SPEC §5.7 / DD-22, DD-35, DD-101): Noto Sans,
-//! Noto Sans Italic, Noto Serif, Noto Sans Mono, and Noto Sans Symbols.
-//! Noto Color Emoji and Noto Sans SC are optional packs and must not be
-//! required in the first build (Q-05).
+//! Required UA fonts (SPEC v24.2 §5.7 / DD-22, DD-35, DD-101): Noto Sans,
+//! Noto Sans Italic, Noto Serif, Noto Sans Mono, Noto Sans Symbols,
+//! Noto Sans SC, and Noto Emoji (monochrome).
+//!
+//! Retirement: the step-3 assertions that the empty-set error must *not*
+//! contain "Noto Color Emoji" or "Noto Sans SC" are retired because Ashley
+//! reversed Q-05 / DD-35 on 2026-11-16 ("Add the fonts in the 4th if it
+//! will help."). CJK and emoji are now required UA fonts. The required
+//! emoji name is "Noto Emoji" (monochrome), not "Noto Color Emoji",
+//! because color-emoji paint support is not established in the vendored
+//! renderer.
 
 use s3a_pack_kite::{KiteContext, KiteError};
 
@@ -15,6 +22,8 @@ const REQUIRED_UA_FONTS: &[&str] = &[
     "Noto Serif",
     "Noto Sans Mono",
     "Noto Sans Symbols",
+    "Noto Sans SC",
+    "Noto Emoji",
 ];
 
 fn complete_set() -> Vec<(String, Vec<u8>)> {
@@ -32,14 +41,6 @@ fn assert_names_missing_fonts(err: &KiteError) {
             "KiteError message must name missing font {name:?}; got {message:?}"
         );
     }
-    assert!(
-        !message.contains("Noto Color Emoji"),
-        "optional emoji pack must not be a required UA font: {message:?}"
-    );
-    assert!(
-        !message.contains("Noto Sans SC"),
-        "optional CJK pack must not be a required UA font: {message:?}"
-    );
 }
 
 #[test]
@@ -64,6 +65,40 @@ fn missing_one_required_font_is_named() {
         err.message().contains(&removed.0),
         "KiteError must name the missing font {}; got {:?}",
         removed.0,
+        err.message()
+    );
+}
+
+#[test]
+fn missing_cjk_font_is_named() {
+    let fonts: Vec<(String, Vec<u8>)> = REQUIRED_UA_FONTS
+        .iter()
+        .filter(|name| **name != "Noto Sans SC")
+        .map(|name| ((*name).to_string(), format!("{name} fixture bytes").into_bytes()))
+        .collect();
+    let err = KiteContext::new(fonts).expect_err(
+        "a set missing required Noto Sans SC must be KiteError after the Q-05 reversal",
+    );
+    assert!(
+        err.message().contains("Noto Sans SC"),
+        "KiteError must name missing Noto Sans SC; got {:?}",
+        err.message()
+    );
+}
+
+#[test]
+fn missing_emoji_font_is_named() {
+    let fonts: Vec<(String, Vec<u8>)> = REQUIRED_UA_FONTS
+        .iter()
+        .filter(|name| **name != "Noto Emoji")
+        .map(|name| ((*name).to_string(), format!("{name} fixture bytes").into_bytes()))
+        .collect();
+    let err = KiteContext::new(fonts).expect_err(
+        "a set missing required Noto Emoji must be KiteError after the Q-05 reversal",
+    );
+    assert!(
+        err.message().contains("Noto Emoji"),
+        "KiteError must name missing Noto Emoji; got {:?}",
         err.message()
     );
 }
