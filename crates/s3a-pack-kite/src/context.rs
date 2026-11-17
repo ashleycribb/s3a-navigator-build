@@ -3,15 +3,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::KiteError;
 
-/// Required UA fonts for `KiteContext::new` (SPEC §5.7 / DD-22, DD-35).
-/// Optional CJK (Noto Sans SC) and emoji (Noto Color Emoji) packs are not
-/// required in the first build (Q-05).
+/// Required UA fonts for `KiteContext::new` (SPEC v24.2 §5.7 / DD-22, DD-35).
+/// Noto Sans SC and monochrome Noto Emoji are required after the 2026-11-16
+/// reversal of Q-05. Color-emoji paint is not claimed.
 pub const REQUIRED_UA_FONTS: &[&str] = &[
     "Noto Sans",
     "Noto Sans Italic",
     "Noto Serif",
     "Noto Sans Mono",
     "Noto Sans Symbols",
+    "Noto Sans SC",
+    "Noto Emoji",
 ];
 
 /// A clock that returns Unix UTC seconds (AT-161 / DD-110).

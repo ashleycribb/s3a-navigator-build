@@ -1,0 +1,34 @@
+s3a-kite required UA font packs added in SPEC v24.2
+(Q-05 / DD-35 reversed 2026-11-16)
+
+These files are shipped as required UA fonts. They are not fetched over
+the network. system_fonts stays false.
+
+Noto Sans SC (CJK)
+  File: vendor/s3a-Navigator/packages/engine/public/fonts/NotoSansCJKsc-Regular.woff2
+  Measured size: 6,093,444 bytes
+  License: SIL Open Font License 1.1
+  License file: vendor/s3a-Navigator/licenses/OFL-1.1-Noto-SC.txt
+  NOTICE: vendor/s3a-Navigator/NOTICE
+  Source: notofonts/noto-cjk tag Sans2.004
+
+Noto Emoji (monochrome)
+  File: assets/ua-fonts/NotoEmoji[wght].ttf
+  Measured size: 1,982,596 bytes
+  Format: TrueType variable font (glyf outlines; weight axis 300–700).
+  This file has no COLR, CPAL, CBDT, CBLC, sbix, or SVG tables.
+  Color-emoji paint support is not established in the vendored renderer,
+  so this monochrome font is the required emoji UA font; color-emoji
+  paint is not claimed.
+  License: SIL Open Font License 1.1
+  Copyright 2013 Google LLC
+  License file: assets/ua-fonts/OFL-1.1-Noto-Emoji.txt
+  Source: https://github.com/google/fonts/tree/main/ofl/notoemoji
+  Upstream OFL: https://github.com/google/fonts/blob/main/ofl/notoemoji/OFL.txt
+
+Combined measured size of these two added packs: 8,076,040 bytes.
+
+The effect of these sizes on the pack or APK and on max_open_bytes /
+Pixel 9 budgets (peak RSS, time to first manifest frame, APK size
+delta) is an open measurement item under Q-06 and Q-17. This NOTICE
+records measured file sizes only; it invents no budget numbers.
