@@ -1,1 +1,2 @@
-//! Pack-linking acceptance tests land here once `s3a-pack-kite` exists (DD-121).
+//! Pack-linking acceptance tests for `s3a-pack-kite` (DD-121).
+//! AT-42 lives in `tests/at_42.rs`.

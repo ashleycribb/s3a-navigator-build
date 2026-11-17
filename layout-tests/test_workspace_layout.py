@@ -21,7 +21,6 @@ KITE_ACCEPTANCE = REPO_ROOT / "kite-acceptance" / "Cargo.toml"
 KITE_PACK_TESTS_TOML = REPO_ROOT / "kite-pack-tests" / "Cargo.toml"
 KITE_PACK_TESTS_LOCK = REPO_ROOT / "kite-pack-tests" / "Cargo.lock"
 HOST_CRATE = REPO_ROOT / "crates" / "s3a-kite" / "Cargo.toml"
-PACK_CRATE = REPO_ROOT / "crates" / "s3a-pack-kite"
 READER_TESTS = REPO_ROOT / "reader-pack-tests" / "Cargo.toml"
 
 
@@ -121,12 +120,9 @@ class WorkspaceLayoutTests(unittest.TestCase):
             _has_dep(data, "s3a-pack-kite"),
             "crates/s3a-kite must have no pack dependency until the pack exists (DD-121)",
         )
-
-    def test_06_pack_crate_is_absent_in_step_1(self) -> None:
-        self.assertFalse(
-            PACK_CRATE.exists(),
-            "crates/s3a-pack-kite must not be created in step 1 (vendoring and the pack crate are later steps)",
-        )
+        # The pack crate itself is created in build-plan step 3 and is
+        # asserted by layout-tests/test_pack_skeleton.py (AT-01, AT-42).
+        # It must remain out of the workspace (test_02 / DD-121).
 
     def test_07_vendor_pin_file_records_the_navigator_fork(self) -> None:
         self.assertTrue(PIN_PATH.is_file(), f"missing vendor pin file: {PIN_PATH}")
