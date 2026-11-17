@@ -8,6 +8,7 @@ exclude = [
     "kite-pack-tests",
     "reader-pack-tests",
     "layout-tests",
+    "vendor/s3a-Navigator",
 ]
 
 [workspace.package]
