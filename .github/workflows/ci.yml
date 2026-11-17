@@ -17,3 +17,7 @@ jobs:
         run: cargo check --workspace
       - name: Workspace cargo test
         run: cargo test --workspace
+      - name: Pack crate tests
+        run: cargo test --manifest-path crates/s3a-pack-kite/Cargo.toml
+      - name: Pack-linking tests
+        run: cargo test --manifest-path kite-pack-tests/Cargo.toml

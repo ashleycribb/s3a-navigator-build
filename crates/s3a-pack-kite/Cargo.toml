@@ -1,0 +1,10 @@
+[package]
+name = "s3a-pack-kite"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "S3A Navigator pack: KiteContext, KiteError, and (later) render/open APIs. Excluded from the workspace until it joins (DD-121)."
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]

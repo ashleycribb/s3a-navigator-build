@@ -5,6 +5,7 @@ members = [
 ]
 exclude = [
     "crates/s3a-kite",
+    "crates/s3a-pack-kite",
     "kite-pack-tests",
     "reader-pack-tests",
     "layout-tests",
