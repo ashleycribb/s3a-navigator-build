@@ -133,11 +133,7 @@ class WorkspaceLayoutTests(unittest.TestCase):
         body = PIN_PATH.read_text(encoding="utf-8")
         self.assertIn(PIN_URL, body, f"{PIN_PATH} must name {PIN_URL}")
         self.assertIn(PIN_COMMIT, body, f"{PIN_PATH} must pin {PIN_COMMIT}")
-        # The vendored tree itself is step 2, not step 1.
-        self.assertFalse(
-            (REPO_ROOT / "vendor" / "s3a-Navigator" / "Cargo.toml").is_file(),
-            "do not vendor the fork in step 1; only the pin file belongs here",
-        )
+        # The vendored tree is asserted by step 2's layout-tests/test_vendor_tree.py.
 
     def test_08_reader_pack_tests_crate_path_is_reserved(self) -> None:
         self.assertTrue(

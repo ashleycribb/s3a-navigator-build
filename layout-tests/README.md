@@ -1,9 +1,13 @@
-Step 1 acceptance tests for the v24.1 build plan.
+Acceptance tests for the v24.1 build plan workspace and vendor steps.
 
-These tests assert the cargo workspace layout required by SPEC.md §5.1 / DD-121 / §11 step 1. They are not a product crate and must not be added as a workspace member of the scaffold.
+- `test_workspace_layout.py` — step 1 DD-121 cargo workspace layout (§11.1).
+- `test_vendor_tree.py` — step 2 vendored Navigator Rust core, LICENSE/NOTICE,
+  native-host / getrandom / wasm_bindgen gates, Apache change notices (AT-02,
+  AT-03), and the GitHub Actions workflow (§11.2).
 
-Run from this directory or from the repo root:
+These tests are not a product crate and must not be added as a workspace
+member. Do not edit them to make them pass.
 
-    python3 layout-tests/test_workspace_layout.py
+Run from the repo root:
 
-They are expected to fail until the scaffold in build-plan step 1 is implemented. Do not edit these tests to make them pass.
+    python3 -m unittest discover -s layout-tests -p 'test_*.py' -v
