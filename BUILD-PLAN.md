@@ -1,6 +1,6 @@
 # S3A Navigator — test-first build plan
 
-Local work for the pack specified in `SPEC.md` v24.3. Product names in the tree stay `s3a-kite` / `S3A_KITE_*` until the dedicated rename step. The GitHub fork is [ashleycribb/s3a-Navigator](https://github.com/ashleycribb/s3a-Navigator) (the former `s3a-Kite` URL redirects); vendor pin `235111c6fe10f2d63f3476bf5e3d19b4c7089415`.
+Local work for the pack specified in `SPEC.md` v24.3. Product names in the tree stay `s3a-kite` / `S3A_KITE_*` until the dedicated rename step. The GitHub fork is [ashleycribb/s3a-Navigator](https://github.com/ashleycribb/s3a-Navigator) (the former `s3a-Kite` URL redirects); vendor pin `235111c6fe10f2d63f3476bf5e3d19b4c7089415`. s3a-storage pin `2cf2b45fb1a3375735687252d93a612fb6c9f773` (PR 210 merged 2026-11-17, America/New_York).
 
 ## Rules
 
@@ -66,7 +66,7 @@ F-04 (`fetch_error` vocabulary, DNS/mid-body/decode, timeout starts before DNS),
 
 **Dependency (do this before the write path).** Add fd-taking `TileWriter` create/append and `seal_archive` in `s3a-engine`, used on the same file description that holds `LOCK_EX`. `/proc/self/fd` and path reopen are forbidden for snapshot and download temps.
 
-F-13 is in https://github.com/ashleycribb/s3a-storage/pull/210 (pending merge). The PR adds `TileWriter::create_from_file` / `open_append_from_file`, `TileWriter::into_file`, and `seal_archive_from_file` on an already-open file description. Those symbols are `cfg`-gated out on wasm32 (no file descriptors; not stubbed). Path-based APIs are unchanged. Do not merge the PR, and do not bump the s3a-storage pin, until Ashley says so.
+**Done (2026-11-17, America/New_York).** F-13 landed in https://github.com/ashleycribb/s3a-storage/pull/210, merged to `main` as `2cf2b45fb1a3375735687252d93a612fb6c9f773`. The merge adds `TileWriter::create_from_file` / `create_from_file_with_uuid` / `open_append_from_file`, `TileWriter::into_file`, and `seal_archive_from_file` on an already-open file description. Those symbols are `cfg`-gated out on wasm32 (no file descriptors; not stubbed). Path-based APIs are unchanged. The merge accepts the Windows-only unlock edit to `crates/s3a-engine/tests/fd_taking_writer.rs`. This build pins s3a-storage at `2cf2b45fb1a3375735687252d93a612fb6c9f773`.
 
 **ATs:** AT-239.
 
