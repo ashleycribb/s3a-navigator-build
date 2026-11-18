@@ -38,7 +38,3 @@ jobs:
         run: cargo test --manifest-path crates/s3a-pack-kite/Cargo.toml
       - name: Pack-linking tests
         run: cargo test --manifest-path kite-pack-tests/Cargo.toml
-    cd /tmp/s3a-cli-oracle
-    git checkout -q 2cf2b45fb1a3375735687252d93a612fb6c9f773
-    cargo build -p s3a-cli
-    echo "S3A_CLI_BIN=/tmp/s3a-cli-oracle/target/debug/s3a-cli" >> "$GITHUB_ENV"
