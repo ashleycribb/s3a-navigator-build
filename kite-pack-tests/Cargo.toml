@@ -8,3 +8,12 @@ publish = false
 
 [dev-dependencies]
 s3a-pack-kite = { path = "../crates/s3a-pack-kite" }
+# Fixture builders (step 8b): engine/edge/core at the same pin as the pack.
+s3a-core = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
+s3a-engine = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
+s3a-edge = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773", features = ["sign"] }
+# AT-10 CLI oracle parses `s3a-cli tour --json`.
+serde_json = "1"
+# Fixture builders hash payloads and read/write records as bytes.
+bytemuck = "1"
+sha2 = "0.10"

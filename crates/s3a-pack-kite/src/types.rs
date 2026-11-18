@@ -58,3 +58,22 @@ pub(crate) enum ManifestState {
     NotUtf8,
     Unsupported { banner: String },
 }
+
+/// Derived Edge header-sheet components (§5.4 item 3): only fields present.
+#[derive(Debug, Clone)]
+pub(crate) struct EdgeHeaderInfo {
+    pub stride: usize,
+    pub tile_count: u32,
+    pub file_uuid: [u64; 2],
+    pub generation: u64,
+    pub created_timestamp: u64,
+    /// First DeviceIdentityRecord in tile order, if any.
+    pub device: Option<EdgeDeviceInfo>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct EdgeDeviceInfo {
+    pub device_id: [u8; 16],
+    pub hardware_model: String,
+    pub firmware_version: [u16; 4],
+}

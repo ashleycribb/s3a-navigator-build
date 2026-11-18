@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::KiteError;
@@ -37,7 +38,7 @@ impl Clock for ProcessClock {
 /// Holds one UA font set. There is no process-global font state (DD-121).
 pub struct KiteContext {
     ua_fonts: Vec<(String, Vec<u8>)>,
-    clock: Box<dyn Clock + Send + Sync>,
+    clock: Arc<dyn Clock + Send + Sync>,
 }
 
 impl KiteContext {
@@ -76,8 +77,15 @@ impl KiteContext {
         }
         Ok(Self {
             ua_fonts,
-            clock: Box::new(clock),
+            clock: Arc::new(clock),
         })
+    }
+
+    /// The clock this context was built with, shared with opened handles so
+    /// withholding is re-evaluated against the current clock on each render
+    /// (AT-205, DD-110).
+    pub(crate) fn clock_arc(&self) -> Arc<dyn Clock + Send + Sync> {
+        Arc::clone(&self.clock)
     }
 
     /// System / host fonts are never used (`system_fonts` stays false).

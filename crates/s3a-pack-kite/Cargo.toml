@@ -11,7 +11,7 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 s3a-engine = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
-s3a-edge = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
+s3a-edge = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773", features = ["sign"] }
 s3a-core = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
 sha2 = "0.10"
 bytemuck = { version = "1.18", features = ["derive"] }
