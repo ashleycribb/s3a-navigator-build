@@ -11,6 +11,23 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - name: Build s3a-cli oracle (AT-10)
+        # The AT-10 test compares the pack warehouse floor list against
+        # `s3a-cli tour --json`, reading the binary path from S3A_CLI_BIN
+        # (it fails naming the variable when unset). The CLI is built from
+        # the cargo-cached s3a-storage pin checkout (the private repo cannot
+        # be cloned with the default token). This runs before the layout
+        # tests because the layout tests run the pack-linking tests too.
+        run: |
+          set -euo pipefail
+          cargo fetch --manifest-path crates/s3a-pack-kite/Cargo.toml
+          BARE=$(ls -d ~/.cargo/git/db/s3a-storage-* | head -n 1)
+          rm -rf /tmp/s3a-cli-oracle
+          git clone -q --no-checkout "$BARE" /tmp/s3a-cli-oracle
+          cd /tmp/s3a-cli-oracle
+          git checkout -q 2cf2b45fb1a3375735687252d93a612fb6c9f773
+          cargo build -p s3a-cli
+          echo "S3A_CLI_BIN=/tmp/s3a-cli-oracle/target/debug/s3a-cli" >> "$GITHUB_ENV"
       - name: Layout tests
         run: python3 -m unittest discover -s layout-tests -p 'test_*.py' -v
       - name: Workspace cargo check
@@ -21,3 +38,7 @@ jobs:
         run: cargo test --manifest-path crates/s3a-pack-kite/Cargo.toml
       - name: Pack-linking tests
         run: cargo test --manifest-path kite-pack-tests/Cargo.toml
+    cd /tmp/s3a-cli-oracle
+    git checkout -q 2cf2b45fb1a3375735687252d93a612fb6c9f773
+    cargo build -p s3a-cli
+    echo "S3A_CLI_BIN=/tmp/s3a-cli-oracle/target/debug/s3a-cli" >> "$GITHUB_ENV"
