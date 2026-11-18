@@ -3,8 +3,15 @@ name = "s3a-pack-kite"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "S3A Navigator pack: KiteContext, KiteError, and (later) render/open APIs. Excluded from the workspace until it joins (DD-121)."
+description = "S3A Navigator pack: KiteContext, KiteError, open/render for hyper-tile and Edge files. Excluded from the workspace until it joins (DD-121)."
 publish = false
 
 [lib]
 crate-type = ["rlib", "cdylib", "staticlib"]
+
+[dependencies]
+s3a-engine = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
+s3a-edge = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
+s3a-core = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
+sha2 = "0.10"
+bytemuck = { version = "1.18", features = ["derive"] }

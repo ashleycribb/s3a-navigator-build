@@ -82,6 +82,12 @@ YAML front matter and page HTML/Markdown fail closed above an implementation nes
 
 §11 item 3. `MmapReader` for every file type. Withheld-count algorithm. Pinned keys. No type-82 / stride-blind unsealed scanner.
 
+**First slice (2026-11-17, America/New_York), not the whole step.** Pack `open` / `render_manifest` / `proceed_to_warehouse` / `render_warehouse` / `hit_test` / `verification_report` use `MmapReader::from_bytes` for every file type (no path mmap / no `MmapReader::open`), pin `s3a-engine` at `2cf2b45fb1a3375735687252d93a612fb6c9f773`, and do not copy the type-82 consent branch or the stride-blind 128 KiB unsealed walker. First-view text layers and warehouse floor lists are implemented. This slice does not implement pixmap/Okabe-Ito paint, the withheld-count algorithm, pinned-key verification, metadata-only floors, or `render_page`.
+
+**ATs landed in this slice:** AT-08, AT-09, AT-10, AT-14, AT-15, AT-17, AT-18, AT-36 (pack-owned source/tests have no money or OpenTimestamps-write identifiers), AT-64, AT-65, AT-66, AT-72, AT-97. AT-10 asserts floor field names and a `role=floor` node; it does not yet run `s3a-cli tour --json` as the oracle.
+
+**ATs still open for this step:** AT-11, AT-12, AT-13, AT-19, AT-20, AT-23, AT-32, AT-33, AT-34, AT-35, AT-62, AT-67, AT-68, AT-90, AT-107, AT-134, AT-165, AT-201, AT-210, AT-211, AT-220, AT-232, and any other remaining §7 hyper-tile / Edge floor ATs.
+
 **ATs:** AT-08–AT-10, AT-18, AT-19 (Okabe-Ito colours, Q-10), AT-32–AT-36 (as applicable), AT-65–AT-67, AT-90, AT-107, AT-134, AT-165, AT-201, AT-210, AT-211, AT-220, AT-232, and the other hyper-tile / Edge floor ATs in §7.
 
 ### Step 9 — Host binary and Host HTTP API
