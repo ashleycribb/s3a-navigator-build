@@ -53,6 +53,11 @@ pub struct Handle {
     /// bytes (AT-96). `render_page` paints no Select control while this is
     /// `None`, even with `select_enabled` true (AT-144).
     paper_identity: Option<String>,
+    /// Step 10: the effective name hint retained on the handle — the
+    /// `/v1/open` `name` when given, else the basename of the opened path
+    /// (`open_path`), else the caller's hint (`open` / `open_verified`).
+    /// `None` for an unsupported-bytes handle (no name was supplied).
+    name_hint: Option<String>,
     inner: RefCell<HandleInner>,
 }
 
@@ -83,6 +88,14 @@ impl Handle {
     /// `None` for `open` of bytes (AT-96).
     pub fn paper_identity(&self) -> Option<&str> {
         self.paper_identity.as_deref()
+    }
+
+    /// The effective name hint retained on the handle (Step 10, 8c open
+    /// item): the `/v1/open` `name` when given, else the basename of the
+    /// opened path, else the caller's hint. `None` for an unsupported-bytes
+    /// handle.
+    pub fn name_hint(&self) -> Option<&str> {
+        self.name_hint.as_deref()
     }
 
     pub(crate) fn bytes(&self) -> &[u8] {
@@ -189,7 +202,7 @@ fn open_impl(
     // case-insensitive) — never an invalid_magic error (AT-95/AT-130).
     if bytes.len() < 4 || bytes[..4] != S3A_MAGIC {
         let kind = classify_non_archive(&name_hint);
-        return Ok(page_handle(ctx, bytes, kind, max_frame_pixels, paper_identity));
+        return Ok(page_handle(ctx, bytes, kind, max_frame_pixels, name_hint, paper_identity));
     }
     let Some(header) = active_header(bytes) else {
         return Err(KiteError::new(
@@ -239,6 +252,7 @@ fn open_impl(
         manifest,
         edge_header,
         paper_identity,
+        name_hint,
         inner: RefCell::new(HandleInner {
             proceeded: false,
             last_frames: Vec::new(),
@@ -579,6 +593,7 @@ fn page_handle(
     bytes: &[u8],
     kind: Kind,
     max_frame_pixels: u64,
+    name_hint: Option<String>,
     paper_identity: Option<String>,
 ) -> Handle {
     Handle {
@@ -599,6 +614,7 @@ fn page_handle(
         manifest: ManifestState::Absent,
         edge_header: None,
         paper_identity,
+        name_hint,
         inner: RefCell::new(HandleInner {
             proceeded: false,
             last_frames: Vec::new(),
@@ -702,6 +718,7 @@ pub fn open_verified(
         manifest,
         edge_header,
         paper_identity: None,
+        name_hint,
         inner: RefCell::new(HandleInner {
             proceeded: false,
             last_frames: Vec::new(),
@@ -1070,6 +1087,7 @@ fn unsupported_handle(max_frame_pixels: u64, banner: String) -> Handle {
         manifest: ManifestState::Unsupported { banner },
         edge_header: None,
         paper_identity: None,
+        name_hint: None,
         inner: RefCell::new(HandleInner {
             proceeded: false,
             last_frames: Vec::new(),

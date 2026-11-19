@@ -29,7 +29,7 @@ use crate::hooks::Hooks;
 use crate::paths::{
     are_disjoint, canonicalize, close_fd, flock_ex_nb, fstat_fd, fstatat_nofollow,
     is_within, lexical_normalize, lstat_path, open_dir_fd, openat_child, openat_child_rw,
-    read_dir_entries, read_fd_bounded,
+    read_dir_entries, read_fd_bounded, unlink_at,
 };
 use crate::timefmt::rfc3339_secs;
 use crate::token::{check_secret_file, parse_token_bytes};
@@ -932,6 +932,10 @@ pub struct Started {
     pub pinned_keys: Vec<[u8; 32]>,
     pub tls_config: Option<std::sync::Arc<rustls::ServerConfig>>,
     pub consent: ConsentState,
+    /// The parsed LRS credentials (`user:password` from
+    /// `--lrs-credentials-file`, AT-182), present exactly when
+    /// `--lrs-url` is set.
+    pub lrs_credentials: Option<(String, String)>,
     pub working_archive_identity: Option<(u64, u64)>,
     pub kite: KiteContext,
     pub log_file: std::sync::Arc<std::sync::Mutex<std::fs::File>>,
@@ -972,6 +976,13 @@ fn startup_checked(config: Config) -> Result<Started, StartupError> {
     let tls_config = load_tls(&config, &canon)?;
     check_lrs_credentials(&config, &canon)?;
     check_consent_file_mode(&canon)?;
+    // AT-182: parse the LRS credentials file now (a line with fewer
+    // than two fields, an empty username/password, or no credential
+    // line is a startup error naming the file).
+    let lrs_credentials = match &canon.lrs_credentials_file {
+        Some(path) => Some(crate::lrs::parse_credentials_file(path).map_err(StartupError::msg)?),
+        None => None,
+    };
     // ---- Open the dirfds. ----
     let dirfds = open_dirfds(&config, &canon)?;
     // ---- Step 2: take the sidecar locks. ----
@@ -980,6 +991,7 @@ fn startup_checked(config: Config) -> Result<Started, StartupError> {
     let consent = bootstrap_consent(&config, &canon, &dirfds)?;
     let working_archive_identity = bootstrap_working_archive(&config, &canon, &dirfds)?;
     bootstrap_inclusion_index(&config, &canon, &dirfds)?;
+    check_lrs_retry_dir(&dirfds)?;
     cleanup_startup_temps(&config, &canon, &dirfds)?;
     let (ephemeral_temp, ephemeral_marker_fd) = setup_ephemeral_temp()?;
     let log_file = open_log(&config, &canon, &dirfds)?;
@@ -999,6 +1011,7 @@ fn startup_checked(config: Config) -> Result<Started, StartupError> {
         pinned_keys,
         tls_config,
         consent,
+        lrs_credentials,
         working_archive_identity,
         kite,
         log_file,
@@ -1749,10 +1762,17 @@ fn bootstrap_inclusion_index(config: &Config, _canon: &Canon, dirfds: &DirFds) -
                 if line.is_empty() {
                     continue;
                 }
-                if serde_json::from_str::<serde_json::Value>(line).is_err() {
+                // AT-158: a present line must be valid JSON AND contain
+                // every required key (a truncated last line, a non-JSON
+                // line, or a missing key is a startup error naming the
+                // file).
+                if crate::index::IndexLine::from_json(line).is_none() {
                     return Err(StartupError::flag(
                         "--data-dir",
-                        format!("{NAME} line {} is not well-formed JSON", i + 1),
+                        format!(
+                            "{NAME} line {} is not well-formed JSON or is missing a required key",
+                            i + 1
+                        ),
                     ));
                 }
             }
@@ -1768,9 +1788,36 @@ fn bootstrap_inclusion_index(config: &Config, _canon: &Canon, dirfds: &DirFds) -
     }
 }
 
-/// AT-187: startup temp cleanup in --snapshot-dir and --download-dir:
-/// remove stale `s3a-kite-tmp-*` entries only when the same euid can take
-/// an exclusive flock on their marker. Never on a pid check alone.
+/// Step 10 writes retry files under `--data-dir/lrs-retry/` (DD-51):
+/// when it already exists at startup, `lstat` must show a directory;
+/// a regular file there is a startup error naming `lrs-retry`.
+fn check_lrs_retry_dir(dirfds: &DirFds) -> Result<(), StartupError> {
+    let Some(data_fd) = dirfds.data_dir else {
+        return Ok(());
+    };
+    match fstatat_nofollow(data_fd, "lrs-retry") {
+        Ok(st) => {
+            if !st.is_dir {
+                return Err(StartupError::flag(
+                    "--data-dir",
+                    "lrs-retry is not a directory",
+                ));
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(StartupError::flag(
+            "--data-dir",
+            format!("cannot lstat lrs-retry: {e}"),
+        )),
+    }
+}
+
+/// AT-187: startup temp cleanup in --snapshot-dir, --download-dir,
+/// --data-dir, and the consent-file parent: remove stale
+/// `s3a-kite-tmp-*` entries only when the same euid can take an
+/// exclusive flock on their marker (directories) or on the file itself
+/// (temp files). Never on a pid check alone.
 fn cleanup_startup_temps(config: &Config, _canon: &Canon, dirfds: &DirFds) -> Result<(), StartupError> {
     if config.viewer {
         return Ok(());
@@ -1778,6 +1825,8 @@ fn cleanup_startup_temps(config: &Config, _canon: &Canon, dirfds: &DirFds) -> Re
     for (dirfd, flag) in [
         (dirfds.snapshot_dir, "--snapshot-dir"),
         (dirfds.download_dir, "--download-dir"),
+        (dirfds.data_dir, "--data-dir"),
+        (dirfds.consent_parent, "--consent-state-file"),
     ] {
         let Some(dirfd) = dirfd else { continue };
         let entries = read_dir_entries(dirfd).map_err(|e| {
@@ -1787,7 +1836,34 @@ fn cleanup_startup_temps(config: &Config, _canon: &Canon, dirfds: &DirFds) -> Re
             if !entry.name.starts_with("s3a-kite-tmp-") {
                 continue;
             }
-            if entry.is_symlink || !entry.is_dir {
+            if entry.is_symlink {
+                continue;
+            }
+            // A stale temp FILE (§5.6): same-euid + LOCK_EX|LOCK_NB on
+            // the file itself, then unlink it.
+            if entry.is_file {
+                let fd = match openat_child(dirfd, &entry.name, false) {
+                    Ok(fd) => fd,
+                    Err(_) => continue,
+                };
+                let st = match fstat_fd(fd) {
+                    Ok(st) => st,
+                    Err(_) => {
+                        close_fd(fd);
+                        continue;
+                    }
+                };
+                if st.uid != unsafe { libc::geteuid() } || !st.is_regular {
+                    close_fd(fd);
+                    continue;
+                }
+                if flock_ex_nb(fd).is_ok() {
+                    let _ = unlink_at(dirfd, &entry.name);
+                }
+                close_fd(fd);
+                continue;
+            }
+            if !entry.is_dir {
                 continue;
             }
             // Same-euid + flockable marker only.

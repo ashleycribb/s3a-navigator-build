@@ -169,6 +169,19 @@ impl Hooks {
             .any(|p| p.point == point && p.action == HookAction::PauseUntilSignal)
     }
 
+    /// Is a `grow` action configured at `point`? SPEC §5.2.7 (line
+    /// 523): `grow` — valid only on `grow_drive_path_during_copy`.
+    /// During the step-2b copy the HOST extends the already-opened
+    /// `drive_path` so that more than `--max-open-bytes` arrive. It is
+    /// NOT a pause: no READY/CONTINUE signal is involved (the host
+    /// grows the file itself), and `from_env` does not set
+    /// `needs_signals` for a `Grow` action.
+    pub fn grow_at(&self, point: &str) -> bool {
+        self.points
+            .iter()
+            .any(|p| p.point == point && p.action == HookAction::Grow)
+    }
+
     /// Fire a `pause_until_signal` hook: create/replace READY with the
     /// hook-point name + newline, wait until CONTINUE exists as a
     /// non-empty regular file, then delete CONTINUE.

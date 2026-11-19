@@ -67,6 +67,10 @@ pub struct Host {
     /// The write mutex (DD-102): select, download, and consent. Skip
     /// does not take it. Candidate membership is computed before it.
     pub write_mu: Mutex<()>,
+    /// The in-flight step-2 fetch registry, keyed by
+    /// `(file_uuid_hex, identity)` (Step 10, DD-104). A waiter never
+    /// starts a GET and never appends an index line.
+    pub inflight: Mutex<HashMap<(String, String), Arc<crate::write_path::InFlightFetch>>>,
     pub shutdown: Arc<AtomicBool>,
     /// Set when a fail-closed error (DD-138) requires a non-zero exit
     /// after the response is written.
@@ -83,6 +87,7 @@ impl Host {
             selected: Mutex::new(HashSet::new()),
             consent: Mutex::new(consent),
             write_mu: Mutex::new(()),
+            inflight: Mutex::new(HashMap::new()),
             shutdown,
             fail_closed: AtomicBool::new(false),
         }
@@ -1171,8 +1176,9 @@ impl Host {
         )
     }
 
-    /// Is `paper_id` in the candidate set recomputed at this request?
-    fn is_candidate(&self, paper_id: &str) -> bool {
+    /// The candidate for `paper_id`, recomputed at this request
+    /// (membership is computed BEFORE the write mutex).
+    fn find_candidate(&self, paper_id: &str) -> Option<crate::candidates::Candidate> {
         let papers = list_candidates(
             &self.started.canon,
             &self.started.dirfds,
@@ -1181,7 +1187,12 @@ impl Host {
             self.config().max_open_bytes,
             &self.started.pinned_keys,
         );
-        papers.iter().any(|c| c.id == paper_id)
+        papers.into_iter().find(|c| c.id == paper_id)
+    }
+
+    /// Is `paper_id` in the candidate set recomputed at this request?
+    fn is_candidate(&self, paper_id: &str) -> bool {
+        self.find_candidate(paper_id).is_some()
     }
 
     /// The shared Scholar write-route preamble: 415 → 413 → viewer_only
@@ -1209,28 +1220,12 @@ impl Host {
             Err(r) => return r,
         };
         // Candidate membership is computed BEFORE the write mutex.
-        if !self.is_candidate(&paper_id) {
+        let Some(cand) = self.find_candidate(&paper_id) else {
             return err(404, "unknown_paper", "paper is not in the candidate set");
-        }
-        let _guard = self.write_mu.lock().unwrap();
-        // Step 9: select writes nothing (no inclusion record, snapshot,
-        // fingerprint, or index line). With no --lrs-url the select
-        // completes here; with --lrs-url the LRS client is Step 11.
-        if self.config().lrs_url.is_some() {
-            return err(
-                500,
-                "internal",
-                "the LRS client is not implemented in this step",
-            );
-        }
-        {
-            let mut selected = self.selected.lock().unwrap();
-            selected.insert(paper_id);
-        }
-        Response::json(
-            200,
-            serde_json::to_vec(&json!({"ok": true, "lrs_status": "not_configured"})).unwrap(),
-        )
+        };
+        // Step 10: the Scholar write path (steps 0/1/3; select writes
+        // nothing durable).
+        crate::write_path::run_select(self, &cand)
     }
 
     // ---- POST /v1/download ----
@@ -1240,15 +1235,11 @@ impl Host {
             Ok(id) => id,
             Err(r) => return r,
         };
-        if !self.is_candidate(&paper_id) {
+        let Some(cand) = self.find_candidate(&paper_id) else {
             return err(404, "unknown_paper", "paper is not in the candidate set");
-        }
-        // The download write path (fetch, snapshot, inclusion) is Step 10.
-        err(
-            500,
-            "internal",
-            "the download write path is not implemented in this step",
-        )
+        };
+        // Step 10: the Scholar write path (steps 0/1/2/2b/3).
+        crate::write_path::run_download(self, &cand)
     }
 
     // ---- POST /v1/skip ----
@@ -1293,33 +1284,14 @@ impl Host {
             Ok(v) => v,
             Err(r) => return r,
         };
-        if !self.is_candidate(&paper_id) {
+        // Candidate membership is computed BEFORE the write mutex.
+        let Some(cand) = self.find_candidate(&paper_id) else {
             return err(404, "unknown_paper", "paper is not in the candidate set");
-        }
-        {
-            let selected = self.selected.lock().unwrap();
-            if !selected.contains(&paper_id) {
-                return err(404, "not_selected", "no prior select of this paper");
-            }
-        }
-        // `already_included` can never trigger in Step 9 (no inclusion
-        // index is written); it is a Step 10 check.
-        let _guard = self.write_mu.lock().unwrap();
-        if self.config().lrs_url.is_some() {
-            return err(
-                500,
-                "internal",
-                "the LRS client is not implemented in this step",
-            );
-        }
-        {
-            let mut selected = self.selected.lock().unwrap();
-            selected.remove(&paper_id);
-        }
-        Response::json(
-            200,
-            serde_json::to_vec(&json!({"ok": true, "lrs_status": "not_configured"})).unwrap(),
-        )
+        };
+        // Step 10: the Scholar write path (`already_included` →
+        // `not_selected` → remove → step 3). A successful deselect
+        // writes no tile-10 and no inclusion-index line.
+        crate::write_path::run_deselect(self, &cand)
     }
 
     // ---- GET /v1/consent ----

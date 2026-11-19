@@ -30,11 +30,21 @@ s3a-pack-kite = { path = "../s3a-pack-kite" }
 s3a-engine = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
 s3a-core = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
 s3a-pack-scholar = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
+s3a-pack-clean = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
 # TLS server (hand-rolled std-thread HTTP server + rustls; no tokio/hyper,
 # so the SPEC's connection-level behaviours stay exactly controllable).
 rustls = { version = "0.23", features = ["ring"] }
+# TLS client roots for the https fetch / LRS clients (§5.2.4, DD-65).
+webpki-roots = "0.26"
 png = "0.18"
 serde_json = "1"
 base64 = "0.22"
 libc = "0.2"
 sha2 = "0.10"
+# CRC32C object hashes (§5.5), gzip/deflate decode (§5.2.4), UUID v4
+# statement ids and inclusion-record session UUIDs (§5.5).
+crc32c = "0.6"
+flate2 = "1"
+uuid = { version = "1", features = ["v4"] }
+# POD record/header reads (FileHeader, HumanLrsRecord) in the write path.
+bytemuck = "1"

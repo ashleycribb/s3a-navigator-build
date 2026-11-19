@@ -35,6 +35,10 @@ pub struct Candidate {
     pub on_disk: bool,
     pub page_path: Option<PathBuf>,
     pub archive_path: Option<PathBuf>,
+    /// The raw front-matter `drive_path` (NOT exposed in the
+    /// `/v1/candidates` JSON). The write path re-derives the DD-59
+    /// resolution per request from this value.
+    pub drive_path: Option<String>,
 }
 
 /// Enumerate candidates for a Scholar host. Files that cannot be read,
@@ -116,6 +120,7 @@ pub fn list_candidates(
                         on_disk: false,
                         page_path: None,
                         archive_path: Some(canonical.clone()),
+                        drive_path: None,
                     });
             }
         }
@@ -194,6 +199,7 @@ fn collect_dossiers(
                     c.title = fm.title.clone();
                     c.source_url = source_url.clone();
                     c.on_disk = on_disk;
+                    c.drive_path = fm.drive_path.clone();
                 }
             })
             .or_insert_with(|| Candidate {
@@ -203,6 +209,7 @@ fn collect_dossiers(
                 on_disk,
                 page_path: Some(canonical.clone()),
                 archive_path: None,
+                drive_path: fm.drive_path.clone(),
             });
     }
     close_fd(papers_fd);
@@ -311,6 +318,32 @@ pub fn open_relative(root_fd: RawFd, rel: &Path) -> Option<RawFd> {
     for component in rel.components() {
         let name = component.as_os_str().to_string_lossy().into_owned();
         let next = openat_child(fd, &name, false).ok()?;
+        if fd != root_fd {
+            owned.push(fd);
+        }
+        fd = next;
+    }
+    for old in owned {
+        close_fd(old);
+    }
+    Some(fd)
+}
+
+/// The DD-146 walk with the final component opened O_RDWR instead of
+/// O_RDONLY (intermediate components stay O_RDONLY). Used only when the
+/// `grow_drive_path_during_copy` hook is configured, so the host can
+/// extend the already-opened `drive_path` itself (§5.2.7 line 523).
+pub fn open_relative_rw(root_fd: RawFd, rel: &Path) -> Option<RawFd> {
+    let mut fd = root_fd;
+    let mut owned: Vec<RawFd> = Vec::new();
+    let mut components = rel.components().peekable();
+    while let Some(component) = components.next() {
+        let name = component.as_os_str().to_string_lossy().into_owned();
+        let next = if components.peek().is_none() {
+            crate::paths::openat_child_rw(fd, &name, false).ok()?
+        } else {
+            openat_child(fd, &name, false).ok()?
+        };
         if fd != root_fd {
             owned.push(fd);
         }

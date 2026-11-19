@@ -1084,3 +1084,931 @@ impl Drop for RunningHost {
         let _ = self.child.wait();
     }
 }
+
+// =====================================================================
+// Step 10 additions: egress/LRS fixtures, configurable Scholar spawn,
+// archive + inclusion-index inspection helpers.
+// =====================================================================
+
+use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+
+pub fn host_bin_egress() -> String {
+    env_bin(
+        "S3A_KITE_BIN_EGRESS_TEST",
+        "a built s3a-kite host binary with feature egress_test (cargo build --offline --features egress_test --target-dir target/egress)",
+    )
+}
+
+pub fn host_bin_egress_hooks() -> String {
+    env_bin(
+        "S3A_KITE_BIN_EGRESS_TEST_HOOKS",
+        "a built s3a-kite host binary with features native-window,test_hooks,egress_test (the hooks binary, target/hooks)",
+    )
+}
+
+/// Which host binary a Step 10 test spawns.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HostBin {
+    Default,
+    Hooks,
+    Egress,
+    EgressHooks,
+}
+
+/// Options for a configurable Scholar host (Step 10). Defaults match the
+/// step-9 `scholar` spawn (30 s fetch timeout, 8 MiB caps, 5 redirects).
+pub struct ScholarOpts {
+    pub bin: HostBin,
+    /// Full `--lrs-url` value (e.g. an LRS fixture URL). `None` means no LRS.
+    pub lrs_url: Option<String>,
+    /// POST consent `on` after spawn (requires `lrs_url`).
+    pub consent_on: bool,
+    pub fetch_timeout_secs: u64,
+    pub max_fetch_bytes: u64,
+    pub max_open_bytes: u64,
+    pub max_redirects: u64,
+    pub egress_test_loopback_port: Option<u16>,
+    pub extra: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub setup: Option<Box<dyn Fn(&TempDir)>>,
+}
+
+impl Default for ScholarOpts {
+    fn default() -> Self {
+        ScholarOpts {
+            bin: HostBin::Default,
+            lrs_url: None,
+            consent_on: false,
+            fetch_timeout_secs: 30,
+            max_fetch_bytes: MAX_OPEN_BYTES,
+            max_open_bytes: MAX_OPEN_BYTES,
+            max_redirects: 5,
+            egress_test_loopback_port: None,
+            extra: Vec::new(),
+            env: Vec::new(),
+            setup: None,
+        }
+    }
+}
+
+impl RunningHost {
+    /// Spawn a Scholar host with Step 10 options (caps, LRS fixture URL,
+    /// egress-test port, binary flavour, hook env vars).
+    pub fn scholar_opts(opts: ScholarOpts) -> RunningHost {
+        let bin = match opts.bin {
+            HostBin::Default => host_bin(),
+            HostBin::Hooks => host_bin_hooks(),
+            HostBin::Egress => host_bin_egress(),
+            HostBin::EgressHooks => host_bin_egress_hooks(),
+        };
+        let dir = TempDir::new("scholar10");
+        let view_root = dir.mkdir("view");
+        let wiki_root = dir.mkdir("wiki");
+        let corpus_root = dir.mkdir("corpus");
+        let snapshot_dir = dir.mkdir("snapshot");
+        let download_dir = dir.mkdir("download");
+        let data_dir = dir.mkdir("data");
+        let log_dir = dir.mkdir("log");
+        let token_file = dir.write("token.txt", format!("{TOKEN}\n").as_bytes());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        if let Some(setup) = &opts.setup {
+            setup(&dir);
+        }
+        let port = free_port();
+        let working_dir = dir.mkdir("working");
+        let working_archive = working_dir.join("working.s3a");
+        let mut args: Vec<String> = vec![
+            "--bind".into(),
+            "127.0.0.1".into(),
+            "--port".into(),
+            port.to_string(),
+            "--auth-token-file".into(),
+            token_file.to_string_lossy().into_owned(),
+            "--log-dir".into(),
+            log_dir.to_string_lossy().into_owned(),
+            "--max-open-handles".into(),
+            "16".into(),
+            "--max-frame-pixels".into(),
+            MAX_FRAME_PIXELS.to_string(),
+            "--handle-idle-secs".into(),
+            "60".into(),
+            "--max-request-bytes".into(),
+            MAX_REQUEST_BYTES.to_string(),
+            "--max-open-bytes".into(),
+            opts.max_open_bytes.to_string(),
+            "--headless".into(),
+            "--wiki-root".into(),
+            wiki_root.to_string_lossy().into_owned(),
+            "--corpus-root".into(),
+            corpus_root.to_string_lossy().into_owned(),
+            "--working-archive".into(),
+            working_archive.to_string_lossy().into_owned(),
+            "--snapshot-dir".into(),
+            snapshot_dir.to_string_lossy().into_owned(),
+            "--download-dir".into(),
+            download_dir.to_string_lossy().into_owned(),
+            "--data-dir".into(),
+            data_dir.to_string_lossy().into_owned(),
+            "--researcher-id".into(),
+            "https://example.test/researcher/ashley".into(),
+            "--fetch-timeout-secs".into(),
+            opts.fetch_timeout_secs.to_string(),
+            "--max-fetch-bytes".into(),
+            opts.max_fetch_bytes.to_string(),
+            "--max-redirects".into(),
+            opts.max_redirects.to_string(),
+        ];
+        if let Some(p) = opts.egress_test_loopback_port {
+            args.push("--egress-test-loopback-port".into());
+            args.push(p.to_string());
+        }
+        if let Some(url) = &opts.lrs_url {
+            let consent = dir.join("consent.txt");
+            let creds = dir.write("lrs-creds.txt", b"lrs-user:lrs-pass");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&creds, std::fs::Permissions::from_mode(0o600))
+                    .unwrap();
+            }
+            args.push("--lrs-url".into());
+            args.push(url.clone());
+            args.push("--consent-state-file".into());
+            args.push(consent.to_string_lossy().into_owned());
+            args.push("--lrs-credentials-file".into());
+            args.push(creds.to_string_lossy().into_owned());
+            args.push("--lrs-timeout-secs".into());
+            args.push("5".into());
+        }
+        for e in &opts.extra {
+            args.push(e.clone());
+        }
+        let mut cmd = Command::new(&bin);
+        cmd.args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (k, v) in &opts.env {
+            cmd.env(k, v);
+        }
+        let child = cmd
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn {bin} {}: {e}", args.join(" ")));
+        let mut host = RunningHost {
+            child,
+            dir,
+            port,
+            socket_path: None,
+            token: TOKEN.to_string(),
+            view_root,
+            wiki_root,
+            corpus_root,
+            snapshot_dir,
+            download_dir,
+            data_dir,
+            log_dir,
+            token_file,
+            tls: false,
+        };
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Ok(Some(status)) = host.child.try_wait() {
+                panic!("host exited during startup (status {status}); log: {}", host.log());
+            }
+            if Instant::now() > deadline {
+                panic!("host did not serve /health within 15s; log: {}", host.log());
+            }
+            let up = host
+                .get_raw_result("/health", &[("Authorization", &format!("Bearer {TOKEN}"))])
+                .map(|r| r.status == 200 && r.body == b"ok\n")
+                .unwrap_or(false);
+            if up {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if opts.consent_on {
+            assert!(
+                opts.lrs_url.is_some(),
+                "consent_on requires an LRS URL"
+            );
+            let resp = host.post("/v1/consent", &serde_json::json!({"state": "on"}));
+            assert_eq!(resp.status, 200, "consent on failed: {}", resp.text());
+        }
+        host
+    }
+
+    /// The working archive path for this host.
+    pub fn working_archive_path(&self) -> PathBuf {
+        self.dir.join("working").join("working.s3a")
+    }
+
+    pub fn consent_on(&self) -> Resp {
+        self.post("/v1/consent", &serde_json::json!({"state": "on"}))
+    }
+
+    pub fn consent_off(&self) -> Resp {
+        self.post("/v1/consent", &serde_json::json!({"state": "off"}))
+    }
+
+    pub fn select(&self, paper_id: &str) -> Resp {
+        self.post("/v1/select", &serde_json::json!({"paper_id": paper_id}))
+    }
+
+    pub fn download(&self, paper_id: &str) -> Resp {
+        self.post("/v1/download", &serde_json::json!({"paper_id": paper_id}))
+    }
+
+    pub fn deselect(&self, paper_id: &str) -> Resp {
+        self.post("/v1/deselect", &serde_json::json!({"paper_id": paper_id}))
+    }
+
+    pub fn skip(&self, paper_id: &str) -> Resp {
+        self.post("/v1/skip", &serde_json::json!({"paper_id": paper_id}))
+    }
+
+    pub fn candidates_json(&self) -> serde_json::Value {
+        let resp = self.get("/v1/candidates");
+        assert_eq!(resp.status, 200, "{}", resp.text());
+        resp.json()
+    }
+}
+
+/// Write a `{stem}.md` dossier under `root/papers/` (wiki or corpus).
+pub fn write_dossier_at(root: &Path, stem: &str, front_matter: &str, body: &str) -> PathBuf {
+    let path = root.join("papers").join(format!("{stem}.md"));
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, format!("---\n{front_matter}\n---\n{body}")).unwrap();
+    path
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(bytes);
+    hex_bytes(&h.finalize())
+}
+
+pub fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Count `HumanLrsRecord` (tile 10) records in an archive file (64 bytes
+/// each). 0 when the file does not exist or is not a readable archive.
+pub fn count_tile10_records(path: &Path) -> usize {
+    let Ok(bytes) = std::fs::read(path) else {
+        return 0;
+    };
+    let Ok(reader) = s3a_engine::MmapReader::from_bytes(&bytes) else {
+        return 0;
+    };
+    let mut n = 0;
+    for i in 0..reader.tile_count() as usize {
+        if let Some((h, _payload)) = reader.get_tile(i) {
+            if h.tile_type == 10 {
+                n += (h.payload_bytes as usize) / 64;
+            }
+        }
+    }
+    n
+}
+
+/// Distinct tile types present in an archive file.
+pub fn archive_tile_types(path: &Path) -> Vec<u32> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    let Ok(reader) = s3a_engine::MmapReader::from_bytes(&bytes) else {
+        return Vec::new();
+    };
+    let mut out: Vec<u32> = Vec::new();
+    for i in 0..reader.tile_count() as usize {
+        if let Some((h, _)) = reader.get_tile(i) {
+            if !out.contains(&h.tile_type) {
+                out.push(h.tile_type);
+            }
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// Parse `--data-dir/inclusion-index.jsonl` into JSON values (one per
+/// non-empty line). Empty vec when the file is missing.
+pub fn read_index_lines(data_dir: &Path) -> Vec<serde_json::Value> {
+    let Ok(text) = std::fs::read_to_string(data_dir.join("inclusion-index.jsonl")) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
+        .collect()
+}
+
+/// Files directly inside a directory (names only, sorted).
+pub fn dir_files(dir: &Path) -> Vec<String> {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = rd
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    out.sort();
+    out
+}
+
+/// Files directly inside a directory excluding the sidecar `.lock` files
+/// the host holds for the whole process (DD-114 lock 1).
+pub fn dir_files_no_lock(dir: &Path) -> Vec<String> {
+    dir_files(dir)
+        .into_iter()
+        .filter(|n| n != ".lock")
+        .collect()
+}
+
+pub fn snapshot_files(snapshot_dir: &Path) -> Vec<String> {
+    dir_files(snapshot_dir)
+        .into_iter()
+        .filter(|n| n.ends_with(".s3a"))
+        .collect()
+}
+
+/// Reassemble the BLOB (tile 68) chunks of a snapshot file for `key`
+/// (the 32-byte SHA-256 of the captured bytes). `None` when the file is
+/// not a readable archive or the key is absent/incomplete.
+pub fn reassemble_snapshot_blob(path: &Path, key: &[u8; 32]) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(path).ok()?;
+    let reader = s3a_engine::MmapReader::from_bytes(&bytes).ok()?;
+    let mut payloads: Vec<Vec<u8>> = Vec::new();
+    for i in 0..reader.tile_count() as usize {
+        if let Some((h, payload)) = reader.get_tile(i) {
+            if h.tile_type == 68 {
+                payloads.push(payload.to_vec());
+            }
+        }
+    }
+    let map = s3a_pack_clean::archive::unchunk(&payloads).ok()?;
+    map.get(key).cloned()
+}
+
+/// Reassemble the PROVENANCE (tile 72) document of a snapshot file (the
+/// single entry). `None` when absent/incomplete.
+pub fn provenance_document(path: &Path) -> Option<String> {
+    let bytes = std::fs::read(path).ok()?;
+    let reader = s3a_engine::MmapReader::from_bytes(&bytes).ok()?;
+    let mut payloads: Vec<Vec<u8>> = Vec::new();
+    for i in 0..reader.tile_count() as usize {
+        if let Some((h, payload)) = reader.get_tile(i) {
+            if h.tile_type == 72 {
+                payloads.push(payload.to_vec());
+            }
+        }
+    }
+    let map = s3a_pack_clean::archive::unchunk(&payloads).ok()?;
+    let (_key, doc) = map.iter().next()?;
+    String::from_utf8(doc.clone()).ok()
+}
+
+/// The BLOB chunk structure of a snapshot: (blob_key, chunk_index,
+/// total_chunks, payload_len) per BLOB tile, in tile order.
+pub fn snapshot_blob_chunks(path: &Path) -> Vec<([u8; 32], u32, u32, usize)> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return Vec::new();
+    };
+    let Ok(reader) = s3a_engine::MmapReader::from_bytes(&bytes) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for i in 0..reader.tile_count() as usize {
+        if let Some((h, payload)) = reader.get_tile(i) {
+            if h.tile_type == 68 && payload.len() >= 40 {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&payload[0..32]);
+                let index = u32::from_le_bytes(payload[32..36].try_into().unwrap());
+                let total = u32::from_le_bytes(payload[36..40].try_into().unwrap());
+                out.push((key, index, total, payload.len() - 40));
+            }
+        }
+    }
+    out
+}
+
+/// Create a working archive WITHOUT `ADDON_EDU` (AT-46 host B): a plain
+/// `TileWriter::create` with no `enable_addon` call.
+pub fn make_no_addon_archive(path: &Path) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    let file = std::fs::File::create(path).unwrap();
+    let _writer = s3a_engine::TileWriter::create_from_file(file).unwrap();
+}
+
+/// Clear the `ADDON_EDU` bit in place (same inode, no rename) in both
+/// header slots of an archive, recomputing each slot's header CRC32C
+/// (AT-46 second case). The file must be a valid archive.
+pub fn clear_addon_bit_in_place(path: &Path) {
+    let mut bytes = std::fs::read(path).unwrap();
+    assert!(bytes.len() >= 128, "archive too small for two header slots");
+    for slot in [0usize, 64usize] {
+        // A zeroed slot was never written; leave it alone.
+        if bytes[slot..slot + 64].iter().all(|b| *b == 0) {
+            continue;
+        }
+        // addon_mask is at offset 44..48; header_crc32 at 40..44.
+        let mask = u32::from_le_bytes(bytes[slot + 44..slot + 48].try_into().unwrap());
+        let cleared = mask & !1u32;
+        bytes[slot + 44..slot + 48].copy_from_slice(&cleared.to_le_bytes());
+        // Recompute the header CRC32C over the slot with the CRC field
+        // zeroed (s3a-engine `compute_header_crc32`).
+        let crc = {
+            let mut c = crc32c::crc32c(&bytes[slot..slot + 40]);
+            c = crc32c::crc32c_append(c, &bytes[slot + 44..slot + 64]);
+            c
+        };
+        bytes[slot + 40..slot + 44].copy_from_slice(&crc.to_le_bytes());
+    }
+    std::fs::write(path, &bytes).unwrap();
+}
+
+pub fn gzip_bytes(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    e.write_all(data).unwrap();
+    e.finish().unwrap()
+}
+
+pub fn deflate_bytes(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    e.write_all(data).unwrap();
+    e.finish().unwrap()
+}
+
+/// Wait until the fixture's GET count for `path` reaches `n` (up to
+/// `timeout`); panics on timeout. Used to order a waiter behind a
+/// starter's in-flight GET.
+pub fn wait_for_fixture_gets(fixture: &FixtureServer, path: &str, n: u64, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if fixture.get_count(path) >= n {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!(
+        "fixture GET count for {path} did not reach {n} within {timeout:?} (got {})",
+        fixture.get_count(path)
+    );
+}
+
+// ---- Fixture HTTP server (egress_test loopback origin) ----
+
+/// One programmable fixture route.
+#[derive(Debug, Clone)]
+pub enum FixtureRoute {
+    /// A static response (status, extra headers, body) after `delay_ms`.
+    Static {
+        status: u16,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+        delay_ms: u64,
+    },
+    /// A 302 redirect to `location`.
+    Redirect { location: String },
+    /// A different body on every GET: `counted-body-{n:08}\n`.
+    Counter,
+    /// Fails with `fail_status` until `set_flaky_succeed(true)`, then 200
+    /// with `body`.
+    Flaky { fail_status: u16, body: Vec<u8> },
+}
+
+struct FixtureState {
+    routes: HashMap<String, FixtureRoute>,
+    counts: HashMap<String, u64>,
+    flaky_succeed: bool,
+    connections: u64,
+}
+
+/// A tiny programmable HTTP/1.1 origin on 127.0.0.1 (the egress_test
+/// fixture). One thread per connection; the accept loop polls a shutdown
+/// flag so `Drop` is prompt.
+pub struct FixtureServer {
+    pub port: u16,
+    state: Arc<Mutex<FixtureState>>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl FixtureServer {
+    pub fn new() -> FixtureServer {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let state = Arc::new(Mutex::new(FixtureState {
+            routes: HashMap::new(),
+            counts: HashMap::new(),
+            flaky_succeed: false,
+            connections: 0,
+        }));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let state2 = state.clone();
+        let shutdown2 = shutdown.clone();
+        std::thread::spawn(move || {
+            while !shutdown2.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        {
+                            let mut s = state2.lock().unwrap();
+                            s.connections += 1;
+                        }
+                        let st = state2.clone();
+                        std::thread::spawn(move || serve_fixture_conn(stream, st));
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }
+        });
+        FixtureServer {
+            port,
+            state,
+            shutdown,
+        }
+    }
+
+    pub fn set_route(&self, path: &str, route: FixtureRoute) {
+        self.state
+            .lock()
+            .unwrap()
+            .routes
+            .insert(path.to_string(), route);
+    }
+
+    pub fn get_count(&self, path: &str) -> u64 {
+        *self.state.lock().unwrap().counts.get(path).unwrap_or(&0)
+    }
+
+    pub fn total_connections(&self) -> u64 {
+        self.state.lock().unwrap().connections
+    }
+
+    pub fn set_flaky_succeed(&self, v: bool) {
+        self.state.lock().unwrap().flaky_succeed = v;
+    }
+
+    /// Install a redirect chain: `/c0` → `/c1` → … → `/c{hops}` →
+    /// `final_path` (`hops` redirects before the final hop's target).
+    pub fn set_redirect_chain(&self, hops: usize, final_path: &str) {
+        for i in 0..=hops {
+            let next = if i == hops {
+                final_path.to_string()
+            } else {
+                format!("/c{}", i + 1)
+            };
+            self.set_route(
+                &format!("/c{i}"),
+                FixtureRoute::Redirect { location: next },
+            );
+        }
+    }
+
+    /// A static 200 route for `path` with `body`.
+    pub fn set_ok(&self, path: &str, body: &[u8]) {
+        self.set_route(
+            path,
+            FixtureRoute::Static {
+                status: 200,
+                headers: Vec::new(),
+                body: body.to_vec(),
+                delay_ms: 0,
+            },
+        );
+    }
+}
+
+impl Drop for FixtureServer {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        // Wake the accept loop so the thread notices promptly.
+        let _ = std::net::TcpStream::connect(("127.0.0.1", self.port));
+    }
+}
+
+fn reason_phrase(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        302 => "Found",
+        400 => "Bad Request",
+        404 => "Not Found",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        503 => "Service Unavailable",
+        _ => "Status",
+    }
+}
+
+fn read_http_request(
+    stream: &mut std::net::TcpStream,
+) -> Option<(String, String, Vec<(String, String)>, Vec<u8>)> {
+    // Read until the header block ends, then the Content-Length body.
+    let mut raw: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 4096];
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .ok()?;
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                raw.extend_from_slice(&buf[..n]);
+                if raw.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+                if raw.len() > 1_048_576 {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    let text = String::from_utf8_lossy(&raw);
+    let mut lines = text.lines();
+    let request_line = lines.next()?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next()?.to_string();
+    let target = parts.next()?.to_string();
+    let mut content_len = 0usize;
+    let mut headers: Vec<(String, String)> = Vec::new();
+    for line in lines.by_ref() {
+        if line.is_empty() {
+            break;
+        }
+        if let Some((n, v)) = line.split_once(':') {
+            let name = n.trim().to_string();
+            let value = v.trim().to_string();
+            if name.eq_ignore_ascii_case("content-length") {
+                content_len = value.parse().unwrap_or(0);
+            }
+            headers.push((name, value));
+        }
+    }
+    let head_end = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|p| p + 4)
+        .unwrap_or(raw.len());
+    let mut body = raw[head_end..].to_vec();
+    while body.len() < content_len {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => body.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+    body.truncate(content_len);
+    Some((method, target, headers, body))
+}
+
+fn serve_fixture_conn(mut stream: std::net::TcpStream, state: Arc<Mutex<FixtureState>>) {
+    let Some((_method, target, _headers, _body)) = read_http_request(&mut stream) else {
+        return;
+    };
+    let path = target.split('?').next().unwrap_or("").to_string();
+    let (route, count) = {
+        let n = {
+            let mut s = state.lock().unwrap();
+            let n = s.counts.entry(path.clone()).or_insert(0);
+            *n += 1;
+            *n
+        };
+        (state.lock().unwrap().routes.get(&path).cloned(), n)
+    };
+    let (status, headers, body, delay_ms) = match route {
+        Some(FixtureRoute::Static {
+            status,
+            headers,
+            body,
+            delay_ms,
+        }) => (status, headers, body, delay_ms),
+        Some(FixtureRoute::Redirect { location }) => (
+            302,
+            vec![("Location".to_string(), location)],
+            Vec::new(),
+            0,
+        ),
+        Some(FixtureRoute::Counter) => (
+            200,
+            Vec::new(),
+            format!("counted-body-{count:08}\n").into_bytes(),
+            500,
+        ),
+        Some(FixtureRoute::Flaky { fail_status, body }) => {
+            let succeed = state.lock().unwrap().flaky_succeed;
+            if succeed {
+                (200, Vec::new(), body, 0)
+            } else {
+                (fail_status, Vec::new(), b"flaky failure\n".to_vec(), 0)
+            }
+        }
+        None => (
+            404,
+            Vec::new(),
+            b"fixture: no such route\n".to_vec(),
+            0,
+        ),
+    };
+    if delay_ms > 0 {
+        std::thread::sleep(Duration::from_millis(delay_ms));
+    }
+    let mut resp = format!(
+        "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        status,
+        reason_phrase(status),
+        body.len()
+    );
+    for (n, v) in &headers {
+        resp.push_str(&format!("{n}: {v}\r\n"));
+    }
+    resp.push_str("\r\n");
+    let mut bytes = resp.into_bytes();
+    bytes.extend_from_slice(&body);
+    let _ = stream.write_all(&bytes);
+    let _ = stream.flush();
+}
+
+// ---- LRS fixture server ----
+
+struct LrsState {
+    status: u16,
+    statements: Vec<serde_json::Value>,
+    auth: Vec<String>,
+    api_versions: Vec<String>,
+    paths: Vec<String>,
+    posts: u64,
+}
+
+/// A programmable xAPI LRS fixture: records every POSTed statement, its
+/// Authorization header, and its X-Experience-API-Version, and answers
+/// with a configurable status. Binds on the given IP (127.0.0.1 or ::1).
+pub struct LrsServer {
+    pub port: u16,
+    pub ip: String,
+    state: Arc<Mutex<LrsState>>,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl LrsServer {
+    pub fn new(ip: &str) -> LrsServer {
+        // An IPv6 literal needs brackets in a SocketAddr string.
+        let addr: std::net::SocketAddr = if ip.contains(':') {
+            format!("[{ip}]:0").parse().unwrap()
+        } else {
+            format!("{ip}:0").parse().unwrap()
+        };
+        let listener = std::net::TcpListener::bind(addr).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let state = Arc::new(Mutex::new(LrsState {
+            status: 200,
+            statements: Vec::new(),
+            auth: Vec::new(),
+            api_versions: Vec::new(),
+            paths: Vec::new(),
+            posts: 0,
+        }));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let state2 = state.clone();
+        let shutdown2 = shutdown.clone();
+        std::thread::spawn(move || {
+            while !shutdown2.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let st = state2.clone();
+                        std::thread::spawn(move || serve_lrs_conn(stream, st));
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+            }
+        });
+        LrsServer {
+            port,
+            ip: ip.to_string(),
+            state,
+            shutdown,
+        }
+    }
+
+    /// The `--lrs-url` value for this fixture (`{scheme}://{host}:{port}/xapi`).
+    pub fn url(&self) -> String {
+        if self.ip.contains(':') {
+            format!("http://[{}]:{}/xapi", self.ip, self.port)
+        } else {
+            format!("http://{}:{}/xapi", self.ip, self.port)
+        }
+    }
+
+    pub fn set_status(&self, status: u16) {
+        self.state.lock().unwrap().status = status;
+    }
+
+    pub fn statements(&self) -> Vec<serde_json::Value> {
+        self.state.lock().unwrap().statements.clone()
+    }
+
+    pub fn statement_count(&self) -> usize {
+        self.state.lock().unwrap().statements.len()
+    }
+
+    pub fn post_count(&self) -> u64 {
+        self.state.lock().unwrap().posts
+    }
+
+    pub fn verbs(&self) -> Vec<String> {
+        self.state
+            .lock()
+            .unwrap()
+            .statements
+            .iter()
+            .filter_map(|s| {
+                s.get("verb")?
+                    .get("id")?
+                    .as_str()
+                    .map(|v| v.to_string())
+            })
+            .collect()
+    }
+
+    pub fn auth_headers(&self) -> Vec<String> {
+        self.state.lock().unwrap().auth.clone()
+    }
+
+    pub fn api_versions(&self) -> Vec<String> {
+        self.state.lock().unwrap().api_versions.clone()
+    }
+
+    pub fn paths(&self) -> Vec<String> {
+        self.state.lock().unwrap().paths.clone()
+    }
+}
+
+impl Drop for LrsServer {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        // An IPv6 literal needs brackets in a SocketAddr string.
+        let addr: std::net::SocketAddr = if self.ip.contains(':') {
+            format!("[{}]:{}", self.ip, self.port).parse().unwrap()
+        } else {
+            format!("{}:{}", self.ip, self.port).parse().unwrap()
+        };
+        let _ = std::net::TcpStream::connect(addr);
+    }
+}
+
+fn serve_lrs_conn(mut stream: std::net::TcpStream, state: Arc<Mutex<LrsState>>) {
+    let Some((_method, target, headers, body)) = read_http_request(&mut stream) else {
+        return;
+    };
+    let header = |name: &str| {
+        headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.clone())
+    };
+    let status = {
+        let mut s = state.lock().unwrap();
+        s.posts += 1;
+        s.paths.push(target.clone());
+        s.auth.push(header("authorization").unwrap_or_default());
+        s.api_versions
+            .push(header("x-experience-api-version").unwrap_or_default());
+        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) {
+            s.statements.push(v);
+        }
+        s.status
+    };
+    let resp = format!(
+        "HTTP/1.1 {status} {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        reason_phrase(status)
+    );
+    let _ = stream.write_all(resp.as_bytes());
+    let _ = stream.flush();
+}

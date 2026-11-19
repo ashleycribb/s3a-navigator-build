@@ -13,6 +13,10 @@ s3a-core = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45f
 s3a-engine = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
 s3a-edge = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773", features = ["sign"] }
 s3a-pack-scholar = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
+# Snapshot chunk reassembly checks (AT-31/AT-82/AT-157) and fixture
+# gzip/deflate bodies (AT-140).
+s3a-pack-clean = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
+flate2 = "1"
 serde_json = "1"
 base64 = "0.22"
 libc = "0.2"
