@@ -561,6 +561,14 @@ pub enum Step1Error {
 ///
 /// Callers must NOT hold the write mutex when calling this (it takes
 /// the mutex itself for the pre-send check and the outcome record).
+///
+/// DD-144 (Step 11): every LRS sender (1) registers with the current
+/// token, (2) re-checks inhibit inactive + flag on, and (3) only then
+/// starts the POST. The POST is cancel-aware: a revoke aborts it
+/// mid-flight (`Aborted`), and the post-send check then reports
+/// `skipped`. Writing a new retry file and the consent/inhibit check
+/// that allows it run in the same mutex hold (AT-156), with the
+/// `pause_before_lrs_retry_write` hook parked just before the write.
 pub fn emit_step3(
     host: &Host,
     verb_id: u32,
@@ -575,16 +583,19 @@ pub fn emit_step3(
     let Some(credentials) = host.started.lrs_credentials.clone() else {
         return "failed";
     };
-    // The pre-send consent check, under a brief mutex hold, plus the
-    // index read for EXT_CONTENT_SHA256 (DD-137).
-    let (consent_on, content_sha256) = {
+    // (1) Register with the current token and (2) re-check inhibit
+    // inactive + flag on, under a brief mutex hold, plus the index
+    // read for EXT_CONTENT_SHA256 (DD-137).
+    let (token, consent_on, inhibit_active, content_sha256) = {
         let _guard = host.write_mu.lock().unwrap();
+        let token = host.latch.register_token();
         let consent_on = host.consent.lock().unwrap().on;
+        let inhibit_active = host.latch.inhibit_active();
         let index = read_index_in(host);
         let sha = last_snapshot_sha(&index, file_uuid_hex, identity);
-        (consent_on, sha)
+        (token, consent_on, inhibit_active, sha)
     };
-    if !consent_on {
+    if !consent_on || inhibit_active {
         return "skipped";
     }
     let statement_id = new_statement_id();
@@ -602,27 +613,56 @@ pub fn emit_step3(
         content_sha256.as_deref(),
         timestamp_sec,
     );
-    let outcome = post_statement(
+    // (3) Only then start the POST (cancel-aware: a revoke aborts it).
+    let (outcome, _detail) = post_statement(
         &lrs,
         &lrs.resolved,
         &credentials,
         &statement,
         host.started.config.lrs_timeout_secs.unwrap_or(30),
         host.started.config.max_open_bytes,
+        Some((&host.latch, token)),
     );
     // Record the outcome under a brief mutex hold, re-checking consent
-    // (a consent-off transition during the POST means `skipped`,
-    // DD-144).
+    // AND the inhibit (a consent-off transition or a revoke during the
+    // POST means `skipped`, DD-144). The retry-file write and the
+    // check that allows it run in this same hold (AT-156).
     let _guard = host.write_mu.lock().unwrap();
     let consent_on = host.consent.lock().unwrap().on;
-    if !consent_on {
+    let inhibit_active = host.latch.inhibit_active();
+    if !consent_on || inhibit_active {
         return "skipped";
     }
     match outcome {
-        PostOutcome::Sent => "sent",
-        PostOutcome::Retryable | PostOutcome::NoResponse => {
-            // A retryable outcome keeps a `{id}.json` retry file
-            // (Step 11 replays it).
+        PostOutcome::Sent => {
+            // A later successful emit starts a new retry episode.
+            host.bump_retry_episode();
+            "sent"
+        }
+        PostOutcome::Retryable | PostOutcome::NoResponse | PostOutcome::Aborted => {
+            // A retryable outcome (or an aborted POST that survived
+            // the re-check above) keeps a `{id}.json` retry file
+            // (the worker replays it). The hook parks just before the
+            // write, inside this hold, so a revoke that lands there
+            // is seen by the re-check below.
+            if host
+                .started
+                .config
+                .hooks
+                .pause_at("pause_before_lrs_retry_write")
+            {
+                host.started
+                    .config
+                    .hooks
+                    .wait_pause("pause_before_lrs_retry_write");
+            }
+            // Re-check after the pause: a revoke during the park
+            // means `skipped` and no retry file (AT-156).
+            let consent_on = host.consent.lock().unwrap().on;
+            let inhibit_active = host.latch.inhibit_active();
+            if !consent_on || inhibit_active {
+                return "skipped";
+            }
             let body = serde_json::to_vec(&statement).unwrap_or_default();
             match data_dirfd(host) {
                 Some(fd) => {
@@ -633,7 +673,13 @@ pub fn emit_step3(
                         "json",
                         &host.started.config.hooks,
                     ) {
-                        Ok(()) => "queued",
+                        Ok(()) => {
+                            // Register the queued file: try 1 ran in
+                            // this request, so it has attempts=1 and
+                            // is not due for another 10 s.
+                            register_queued(host, &statement_id);
+                            "queued"
+                        }
                         Err(_) => "failed",
                     }
                 }
@@ -654,6 +700,23 @@ pub fn emit_step3(
             "failed"
         }
     }
+}
+
+/// Register a file just queued by `emit_step3` in the retry state
+/// (Step 11): try 1 ran in the request, so it has attempts=1 and its
+/// last attempt is now. Called under the write mutex, in the same hold
+/// as the file write, so the worker can never claim the file before
+/// its state entry exists.
+fn register_queued(host: &Host, statement_id: &str) {
+    let episode = host.retry_episode.load(std::sync::atomic::Ordering::SeqCst);
+    host.retry_state.lock().unwrap().insert(
+        statement_id.to_string(),
+        crate::retry::RetryEntry {
+            episode,
+            attempts: 1,
+            last_attempt: Some(std::time::Instant::now()),
+        },
+    );
 }
 
 /// The `lrs_status` for a request whose step 0 matched a verb line

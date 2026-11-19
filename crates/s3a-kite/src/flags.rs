@@ -307,6 +307,17 @@ fn parse_int_required(
 /// Validate the raw flags into a `Config` (mode rules, integers,
 /// cross-flag rules, `--lrs-url`, allowlist, hooks). No filesystem access
 /// here except the LRS hostname DNS resolution (AT-226 startup half).
+/// Is this a study-mode participant code (DD-155, Q-08, AT-237)?
+/// `P-` followed by one or more ASCII digits (e.g. `P-017`). Lab-mode
+/// ids (a username or email) are not participant codes.
+pub fn is_participant_code(id: &str) -> bool {
+    let rest = match id.strip_prefix("P-") {
+        Some(r) => r,
+        None => return false,
+    };
+    !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit())
+}
+
 pub fn validate_config(
     flags: &HashMap<String, Option<String>>,
 ) -> Result<Config, StartupError> {
@@ -539,6 +550,19 @@ pub fn validate_config(
             return Err(StartupError::flag(
                 "--study-id",
                 "must be a non-empty string",
+            ));
+        }
+    }
+    // AT-237 (DD-155, Q-08): in study mode (--study-id set), the
+    // researcher id is a participant code (`P-<digits>`, e.g. `P-017`);
+    // names and emails must not appear as --researcher-id. (In Scholar
+    // mode --researcher-id is always present and non-empty by here.)
+    if study_id.is_some() {
+        let rid = researcher_id.as_deref().unwrap_or("");
+        if !is_participant_code(rid) {
+            return Err(StartupError::flag(
+                "--researcher-id",
+                "in study mode (--study-id set), --researcher-id must be a participant code such as P-017 (names and emails must not appear)",
             ));
         }
     }
@@ -992,6 +1016,10 @@ fn startup_checked(config: Config) -> Result<Started, StartupError> {
     let working_archive_identity = bootstrap_working_archive(&config, &canon, &dirfds)?;
     bootstrap_inclusion_index(&config, &canon, &dirfds)?;
     check_lrs_retry_dir(&dirfds)?;
+    // Step 11: the startup LRS-queue handling (AT-91/AT-111/AT-181/
+    // AT-199) may flip the effective consent state (a revoke-pending
+    // retry treats consent as off).
+    let consent = bootstrap_lrs_queue(&config, &canon, &dirfds, consent)?;
     cleanup_startup_temps(&config, &canon, &dirfds)?;
     let (ephemeral_temp, ephemeral_marker_fd) = setup_ephemeral_temp()?;
     let log_file = open_log(&config, &canon, &dirfds)?;
@@ -1791,6 +1819,89 @@ fn bootstrap_inclusion_index(config: &Config, _canon: &Canon, dirfds: &DirFds) -
 /// Step 10 writes retry files under `--data-dir/lrs-retry/` (DD-51):
 /// when it already exists at startup, `lstat` must show a directory;
 /// a regular file there is a startup error naming `lrs-retry`.
+/// Step 11 startup LRS-queue handling (DD-113, AT-91/AT-111/AT-181/
+/// AT-199). Runs after the sidecar locks and `check_lrs_retry_dir`,
+/// and returns the effective consent state (a revoke-pending retry
+/// flips it to off).
+///
+/// - Without `--lrs-url` (AT-199): delete `--data-dir/lrs-retry/` and
+///   `--data-dir/revoke-pending` if present, then continue with
+///   tracing unconfigured. A delete failure is a startup error naming
+///   the path.
+/// - With `--lrs-url` and a `revoke-pending` regular file (AT-181):
+///   treat consent as off, retry the consent-file write and queue
+///   deletion, then remove `revoke-pending`. A failed consent-file
+///   write names `--consent-state-file`; a failed queue delete names
+///   `lrs-retry`; a failed `revoke-pending` removal names
+///   `revoke-pending`. A non-regular `revoke-pending` is a startup
+///   error naming the path.
+/// - With `--lrs-url`, no `revoke-pending`, consent off (AT-111):
+///   delete the queue (zero LRS requests this run).
+/// - With `--lrs-url`, no `revoke-pending`, consent on (AT-91):
+///   rename leftover `{id}.claimed` files back to `{id}.json` for the
+///   background retry worker.
+fn bootstrap_lrs_queue(
+    config: &Config,
+    canon: &Canon,
+    dirfds: &DirFds,
+    consent: ConsentState,
+) -> Result<ConsentState, StartupError> {
+    let Some(data_fd) = dirfds.data_dir else {
+        return Ok(consent);
+    };
+    let hooks = &config.hooks;
+    if config.lrs_url.is_none() {
+        // AT-199.
+        crate::lrs::delete_retry_dir(data_fd, hooks)
+            .map_err(|e| StartupError::flag("lrs-retry", e))?;
+        crate::lrs::remove_revoke_pending(data_fd, hooks)
+            .map_err(|e| StartupError::flag("revoke-pending", e))?;
+        return Ok(consent);
+    }
+    match crate::lrs::revoke_pending_status(data_fd)
+        .map_err(|e| StartupError::flag("revoke-pending", e))?
+    {
+        crate::lrs::RevokePendingStatus::NonRegular => Err(StartupError::flag(
+            "revoke-pending",
+            "revoke-pending is not a regular file",
+        )),
+        crate::lrs::RevokePendingStatus::RegularFile => {
+            // AT-181: treat consent as off, retry the consent-file
+            // write and queue deletion, then remove revoke-pending.
+            let (Some(parent_fd), Some(basename)) =
+                (dirfds.consent_parent, &canon.consent_basename)
+            else {
+                return Err(StartupError::msg(
+                    "internal: consent state file configured but no dirfd".to_string(),
+                ));
+            };
+            let off_state = ConsentState {
+                on: false,
+                timestamp: Some(rfc3339_secs(std::time::SystemTime::now())),
+            };
+            crate::consent::write_consent_file(parent_fd, basename, off_state.clone())
+                .map_err(|e| StartupError::flag("--consent-state-file", e))?;
+            crate::lrs::delete_retry_dir(data_fd, hooks)
+                .map_err(|e| StartupError::flag("lrs-retry", e))?;
+            crate::lrs::remove_revoke_pending(data_fd, hooks)
+                .map_err(|e| StartupError::flag("revoke-pending", e))?;
+            Ok(off_state)
+        }
+        crate::lrs::RevokePendingStatus::NotPresent => {
+            if consent.on {
+                // AT-91: rename leftover .claimed files back to .json.
+                crate::lrs::rename_claimed_to_json(data_fd)
+                    .map_err(|e| StartupError::flag("lrs-retry", e))?;
+            } else {
+                // AT-111: consent off at start deletes the queue.
+                crate::lrs::delete_retry_dir(data_fd, hooks)
+                    .map_err(|e| StartupError::flag("lrs-retry", e))?;
+            }
+            Ok(consent)
+        }
+    }
+}
+
 fn check_lrs_retry_dir(dirfds: &DirFds) -> Result<(), StartupError> {
     let Some(data_fd) = dirfds.data_dir else {
         return Ok(());

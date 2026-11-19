@@ -75,6 +75,19 @@ pub struct Host {
     /// Set when a fail-closed error (DD-138) requires a non-zero exit
     /// after the response is written.
     pub fail_closed: AtomicBool,
+    /// The DD-144 consent latch (`epoch` + `cleared_epoch` +
+    /// `revokes_in_flight`) + the cancellation-token generation (Step
+    /// 11). All interior mutability via atomics.
+    pub latch: crate::latch::Latch,
+    /// The background retry worker's per-statement state (Step 11),
+    /// keyed by statement id. Only touched while holding the write
+    /// mutex (`emit_step3` registers a file it just queued; the worker
+    /// checks due-ness and claims there too).
+    pub retry_state: Mutex<HashMap<String, crate::retry::RetryEntry>>,
+    /// The retry episode counter (Step 11): a new episode starts at
+    /// process start and after each later successful LRS emit. The
+    /// worker resets attempts for files whose episode is stale.
+    pub retry_episode: AtomicU64,
 }
 
 impl Host {
@@ -90,11 +103,27 @@ impl Host {
             inflight: Mutex::new(HashMap::new()),
             shutdown,
             fail_closed: AtomicBool::new(false),
+            latch: crate::latch::Latch::new(),
+            retry_state: Mutex::new(HashMap::new()),
+            retry_episode: AtomicU64::new(0),
         }
     }
 
     pub fn config(&self) -> &Config {
         &self.started.config
+    }
+
+    /// The `--data-dir` dirfd, if one is configured (Step 11: the LRS
+    /// retry queue, revoke-pending, and failure record live there).
+    pub fn data_dirfd(&self) -> Option<std::os::unix::io::RawFd> {
+        self.started.dirfds.data_dir
+    }
+
+    /// Start a new retry episode (Step 11): called after a successful
+    /// LRS emit, so a previously-exhausted file gets another set of
+    /// tries when the LRS is demonstrably up again.
+    pub fn bump_retry_episode(&self) {
+        self.retry_episode.fetch_add(1, Ordering::SeqCst);
     }
 
     pub fn is_scholar(&self) -> bool {
@@ -1354,11 +1383,38 @@ impl Host {
                 serde_json::to_vec(&json!({"state": "off", "timestamp": serde_json::Value::Null})).unwrap(),
             );
         }
+        // ---- DD-144 receipt-time latch actions (Step 11), BEFORE the
+        // write mutex is taken. An `off` increments `epoch`, the token
+        // generation, and `revokes_in_flight` (cancelling in-flight LRS
+        // POSTs through the current token and swapping in a fresh one);
+        // an `on` records the observed `(epoch, revokes_in_flight)`.
+        let observed = if want_on {
+            Some(self.latch.on_received())
+        } else {
+            self.latch.revoke_received();
+            None
+        };
+        // The pause_after_consent_receipt hook (AT-198): fires after
+        // receipt, before the mutex hold.
+        if self.config().hooks.pause_at("pause_after_consent_receipt") {
+            self.config().hooks.wait_pause("pause_after_consent_receipt");
+        }
         let _guard = self.write_mu.lock().unwrap();
+        // A guard that decrements `revokes_in_flight` at the end of
+        // this hold for an `off` (even a same-state `off`, even on
+        // disconnect mid-hold); only a fail-closed exit disarms it.
+        let mut revoke_guard = RevokeGuard::new(&self.latch, !want_on);
+        // Under the mutex a revoke always re-cancels + swaps the token
+        // again, even for a same-state no-op `off`.
+        if !want_on {
+            self.latch.revoke_under_mutex();
+        }
         let current = self.consent.lock().unwrap().clone();
         if current.on == want_on {
-            // Same-state POST is a no-op that keeps the timestamp (the
-            // DD-144 latch actions on a same-state off are Step 11).
+            // Same-state POST: no persistent writes. For an `off`, the
+            // latch actions above already ran (the guard decrements
+            // `revokes_in_flight` on the way out). For an `on`, a pure
+            // no-op (never touches `cleared_epoch`).
             return Response::json(
                 200,
                 serde_json::to_vec(&json!({
@@ -1369,22 +1425,112 @@ impl Host {
             );
         }
         let now = rfc3339_secs(std::time::SystemTime::now());
-        let new_state = ConsentState {
-            on: want_on,
-            timestamp: Some(now.clone()),
-        };
         let (Some(parent_fd), Some(basename)) = (
             self.started.dirfds.consent_parent,
             self.started.canon.consent_basename.clone(),
         ) else {
             return err(500, "internal", "consent file is not configured");
         };
-        if let Err(e) = write_consent_file(parent_fd, &basename, new_state.clone()) {
-            // DD-138 fail-closed: this is the last response the process
-            // may write; it then stops all LRS sending and exits non-zero.
-            self.fail_closed.store(true, Ordering::SeqCst);
-            self.shutdown.store(true, Ordering::SeqCst);
-            return err(500, "consent_write_failed", &format!("consent file write failed: {e}"));
+        if want_on {
+            return self.consent_on_hold(
+                current,
+                now,
+                parent_fd,
+                &basename,
+                observed.unwrap(),
+                &mut revoke_guard,
+            );
+        }
+        self.consent_off_hold(now, parent_fd, &basename, &mut revoke_guard)
+    }
+
+    /// DD-138 fail-closed response (Step 11): disarm the revoke guard
+    /// (a fail-closed exit skips the `revokes_in_flight` decrement and
+    /// increments `epoch`), set `fail_closed` + `shutdown`, and return
+    /// the one last 500. The process exits non-zero after the response
+    /// is written.
+    fn fail_closed_response(
+        &self,
+        code: &str,
+        message: &str,
+        revoke_guard: &mut RevokeGuard,
+    ) -> Response {
+        revoke_guard.disarm();
+        self.latch.fail_closed_exit();
+        self.fail_closed.store(true, Ordering::SeqCst);
+        self.shutdown.store(true, Ordering::SeqCst);
+        err(500, code, message)
+    }
+
+    /// A qualifying `on` (DD-144), under the write mutex: clear the
+    /// inhibit by a single CAS of `cleared_epoch` to the observed
+    /// epoch, unlink a leftover `revoke-pending` (fsync the parent),
+    /// then write consent `on`. A non-qualifying `on` changes nothing
+    /// (the revoke in flight will set the state to off) and reports
+    /// the current state. Unlink/fsync or consent-file write failure
+    /// is DD-138 fail-closed.
+    fn consent_on_hold(
+        &self,
+        current: ConsentState,
+        now: String,
+        parent_fd: std::os::unix::io::RawFd,
+        basename: &str,
+        observed: (u64, u64),
+        revoke_guard: &mut RevokeGuard,
+    ) -> Response {
+        let (observed_epoch, observed_revokes) = observed;
+        // A qualifying `on`: no revoke was in flight at receipt, none
+        // is in flight now, and `epoch` still equals the observed value.
+        let qualifies = observed_revokes == 0
+            && self.latch.revokes_in_flight() == 0
+            && self.latch.epoch() == observed_epoch;
+        if !qualifies {
+            return Response::json(
+                200,
+                serde_json::to_vec(&json!({
+                    "state": "off",
+                    "timestamp": current.timestamp,
+                }))
+                .unwrap(),
+            );
+        }
+        // Clear the inhibit by a single CAS of `cleared_epoch` to the
+        // observed epoch. (The qualification was just re-checked under
+        // the mutex; a CAS failure means a concurrent revoke landed and
+        // the `on` no longer qualifies.)
+        if !self.latch.try_clear_inhibit(observed_epoch) {
+            return Response::json(
+                200,
+                serde_json::to_vec(&json!({
+                    "state": "off",
+                    "timestamp": current.timestamp,
+                }))
+                .unwrap(),
+            );
+        }
+        // A qualifying `on` first unlinks a leftover `revoke-pending`
+        // (regular file), fsyncs the parent, then writes consent `on`.
+        if let Some(data_fd) = self.data_dirfd() {
+            if let Err(e) =
+                crate::lrs::remove_revoke_pending(data_fd, &self.config().hooks)
+            {
+                return self.fail_closed_response(
+                    "consent_write_failed",
+                    &format!("revoke-pending remove failed: {e}"),
+                    revoke_guard,
+                );
+            }
+        }
+        let new_state = ConsentState {
+            on: true,
+            timestamp: Some(now.clone()),
+        };
+        if let Err(e) = write_consent_file(parent_fd, basename, new_state.clone()) {
+            return self.fail_closed_response(
+                "consent_write_failed",
+                &format!("consent file write failed: {e}"),
+                revoke_guard,
+            );
         }
         {
             let mut consent = self.consent.lock().unwrap();
@@ -1393,10 +1539,122 @@ impl Host {
         Response::json(
             200,
             serde_json::to_vec(&json!({
-                "state": if want_on { "on" } else { "off" },
+                "state": "on",
                 "timestamp": now,
             }))
             .unwrap(),
         )
+    }
+
+    /// A revoke (the flag was on), under the write mutex: the DD-113
+    /// persist sequence — (1) write `revoke-pending`, (2) write the
+    /// consent file `off`, (3) delete the retry queue, (4) remove
+    /// `revoke-pending`. Steps 1–3 run best-effort in sequence; a
+    /// failure in any of them is DD-138 fail-closed (`revoke-pending`
+    /// left in place). Step 4's failure only logs and returns 200
+    /// (AT-229). Without a `--data-dir`, steps 1, 3, and 4 are no-ops
+    /// (there is nothing to persist or delete; the consent file is the
+    /// durable record).
+    fn consent_off_hold(
+        &self,
+        now: String,
+        parent_fd: std::os::unix::io::RawFd,
+        basename: &str,
+        revoke_guard: &mut RevokeGuard,
+    ) -> Response {
+        let off_state = ConsentState {
+            on: false,
+            timestamp: Some(now.clone()),
+        };
+        let data_fd = self.data_dirfd();
+        let rp = match data_fd {
+            Some(fd) => crate::lrs::write_revoke_pending(fd, &self.config().hooks),
+            None => Ok(()),
+        };
+        let cf = write_consent_file(parent_fd, basename, off_state.clone());
+        let dq = match data_fd {
+            Some(fd) => crate::lrs::delete_retry_dir(fd, &self.config().hooks),
+            None => Ok(()),
+        };
+        if rp.is_err() || cf.is_err() || dq.is_err() {
+            // AT-124: a queue-delete failure is 500 revoke_delete_failed;
+            // a consent-file or revoke-pending write failure is 500
+            // consent_write_failed. `revoke-pending` is left in place.
+            let (code, message) = if let Err(e) = dq {
+                (
+                    "revoke_delete_failed",
+                    format!("retry queue delete failed: {e}"),
+                )
+            } else if let Err(e) = cf {
+                (
+                    "consent_write_failed",
+                    format!("consent file write failed: {e}"),
+                )
+            } else {
+                (
+                    "consent_write_failed",
+                    format!("revoke-pending write failed: {}", rp.unwrap_err()),
+                )
+            };
+            return self.fail_closed_response(&code, &message, revoke_guard);
+        }
+        // All three succeeded: remove `revoke-pending` (step 4). A
+        // failure here only logs and returns 200 (AT-229).
+        if let Some(fd) = data_fd {
+            if let Err(e) = crate::lrs::remove_revoke_pending(fd, &self.config().hooks) {
+                self.log_line(&format!("revoke-pending remove failed: {e}"));
+            }
+        }
+        {
+            let mut consent = self.consent.lock().unwrap();
+            *consent = off_state;
+        }
+        Response::json(
+            200,
+            serde_json::to_vec(&json!({
+                "state": "off",
+                "timestamp": now,
+            }))
+            .unwrap(),
+        )
+    }
+
+    /// One identifier-free log line (for the AT-229 revoke-pending
+    /// remove failure, which logs and returns 200).
+    fn log_line(&self, message: &str) {
+        let line = format!(
+            "{} {}\n",
+            rfc3339_secs(std::time::SystemTime::now()),
+            message
+        );
+        if let Ok(mut f) = self.started.log_file.lock() {
+            let _ = f.write_all(line.as_bytes());
+            let _ = f.flush();
+        }
+    }
+}
+
+/// Decrements `revokes_in_flight` at the end of a revoke's mutex hold
+/// (DD-144). Disarmed only by a fail-closed exit.
+struct RevokeGuard<'a> {
+    latch: &'a crate::latch::Latch,
+    active: bool,
+}
+
+impl<'a> RevokeGuard<'a> {
+    fn new(latch: &'a crate::latch::Latch, active: bool) -> Self {
+        RevokeGuard { latch, active }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for RevokeGuard<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.latch.revoke_finished();
+        }
     }
 }

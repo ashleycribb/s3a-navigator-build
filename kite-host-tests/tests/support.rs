@@ -1129,6 +1129,12 @@ pub struct ScholarOpts {
     pub max_fetch_bytes: u64,
     pub max_open_bytes: u64,
     pub max_redirects: u64,
+    /// `--lrs-timeout-secs` when an LRS is configured.
+    pub lrs_timeout_secs: u64,
+    /// `--researcher-id` value (default: the lab fixture id).
+    pub researcher_id: Option<String>,
+    /// `--study-id` value (default: none — lab mode).
+    pub study_id: Option<String>,
     pub egress_test_loopback_port: Option<u16>,
     pub extra: Vec<String>,
     pub env: Vec<(String, String)>,
@@ -1145,6 +1151,9 @@ impl Default for ScholarOpts {
             max_fetch_bytes: MAX_OPEN_BYTES,
             max_open_bytes: MAX_OPEN_BYTES,
             max_redirects: 5,
+            lrs_timeout_secs: 5,
+            researcher_id: None,
+            study_id: None,
             egress_test_loopback_port: None,
             extra: Vec::new(),
             env: Vec::new(),
@@ -1157,13 +1166,19 @@ impl RunningHost {
     /// Spawn a Scholar host with Step 10 options (caps, LRS fixture URL,
     /// egress-test port, binary flavour, hook env vars).
     pub fn scholar_opts(opts: ScholarOpts) -> RunningHost {
+        let dir = TempDir::new("scholar10");
+        Self::scholar_opts_in(dir, opts)
+    }
+
+    /// Spawn a Scholar host on an existing temp dir (restart tests reuse
+    /// the first run's directories: working archive, data dir, logs).
+    pub fn scholar_opts_in(dir: TempDir, opts: ScholarOpts) -> RunningHost {
         let bin = match opts.bin {
             HostBin::Default => host_bin(),
             HostBin::Hooks => host_bin_hooks(),
             HostBin::Egress => host_bin_egress(),
             HostBin::EgressHooks => host_bin_egress_hooks(),
         };
-        let dir = TempDir::new("scholar10");
         let view_root = dir.mkdir("view");
         let wiki_root = dir.mkdir("wiki");
         let corpus_root = dir.mkdir("corpus");
@@ -1217,7 +1232,9 @@ impl RunningHost {
             "--data-dir".into(),
             data_dir.to_string_lossy().into_owned(),
             "--researcher-id".into(),
-            "https://example.test/researcher/ashley".into(),
+            opts.researcher_id
+                .clone()
+                .unwrap_or_else(|| "https://example.test/researcher/ashley".to_string()),
             "--fetch-timeout-secs".into(),
             opts.fetch_timeout_secs.to_string(),
             "--max-fetch-bytes".into(),
@@ -1225,6 +1242,10 @@ impl RunningHost {
             "--max-redirects".into(),
             opts.max_redirects.to_string(),
         ];
+        if let Some(study) = &opts.study_id {
+            args.push("--study-id".into());
+            args.push(study.clone());
+        }
         if let Some(p) = opts.egress_test_loopback_port {
             args.push("--egress-test-loopback-port".into());
             args.push(p.to_string());
@@ -1245,7 +1266,7 @@ impl RunningHost {
             args.push("--lrs-credentials-file".into());
             args.push(creds.to_string_lossy().into_owned());
             args.push("--lrs-timeout-secs".into());
-            args.push("5".into());
+            args.push(opts.lrs_timeout_secs.to_string());
         }
         for e in &opts.extra {
             args.push(e.clone());
@@ -1303,6 +1324,34 @@ impl RunningHost {
             assert_eq!(resp.status, 200, "consent on failed: {}", resp.text());
         }
         host
+    }
+
+    /// Stop the child process (SIGTERM, 2 s grace, SIGKILL) without
+    /// dropping the host struct, so a restart test can reuse its dir.
+    /// After this, `Drop` finds the child already waited.
+    pub fn stop(&mut self) {
+        unsafe {
+            libc::kill(self.child.id() as i32, libc::SIGTERM);
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Ok(Some(_)) = self.child.try_wait() {
+                return;
+            }
+            if Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// Take ownership of the temp dir, leaving a fresh placeholder
+    /// behind (deleted when this host drops). Restart tests spawn the
+    /// next host on the returned dir with `scholar_opts_in`.
+    pub fn take_dir(&mut self) -> TempDir {
+        std::mem::replace(&mut self.dir, TempDir::new("scholar10-placeholder"))
     }
 
     /// The working archive path for this host.
@@ -1859,6 +1908,13 @@ struct LrsState {
     api_versions: Vec<String>,
     paths: Vec<String>,
     posts: u64,
+    /// Sleep before writing the response (AT-156 slow-LRS case).
+    delay: Duration,
+    /// Accept + read the request, then never respond (AT-192 timeout).
+    hang: bool,
+    /// Exact bytes to send instead of the canned response (AT-191
+    /// oversized-remainder cases). `None` means the canned response.
+    raw: Option<Vec<u8>>,
 }
 
 /// A programmable xAPI LRS fixture: records every POSTed statement, its
@@ -1889,6 +1945,9 @@ impl LrsServer {
             api_versions: Vec::new(),
             paths: Vec::new(),
             posts: 0,
+            delay: Duration::from_millis(0),
+            hang: false,
+            raw: None,
         }));
         let shutdown = Arc::new(AtomicBool::new(false));
         let state2 = state.clone();
@@ -1928,6 +1987,22 @@ impl LrsServer {
 
     pub fn set_status(&self, status: u16) {
         self.state.lock().unwrap().status = status;
+    }
+
+    /// Sleep `delay` before writing each response.
+    pub fn set_delay(&self, delay: Duration) {
+        self.state.lock().unwrap().delay = delay;
+    }
+
+    /// Accept and read the request, then never respond.
+    pub fn set_hang(&self, hang: bool) {
+        self.state.lock().unwrap().hang = hang;
+    }
+
+    /// Send these exact bytes as the response (recorded the same way).
+    /// `None` restores the canned response.
+    pub fn set_raw_response(&self, raw: Option<Vec<u8>>) {
+        self.state.lock().unwrap().raw = raw;
     }
 
     pub fn statements(&self) -> Vec<serde_json::Value> {
@@ -1993,7 +2068,7 @@ fn serve_lrs_conn(mut stream: std::net::TcpStream, state: Arc<Mutex<LrsState>>) 
             .find(|(n, _)| n.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.clone())
     };
-    let status = {
+    let (status, delay, hang, raw) = {
         let mut s = state.lock().unwrap();
         s.posts += 1;
         s.paths.push(target.clone());
@@ -2003,8 +2078,34 @@ fn serve_lrs_conn(mut stream: std::net::TcpStream, state: Arc<Mutex<LrsState>>) 
         if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&body) {
             s.statements.push(v);
         }
-        s.status
+        (s.status, s.delay, s.hang, s.raw.clone())
     };
+    if hang {
+        // Never respond; park until the test drops the server (the
+        // accept loop's shutdown flag is not visible here, so sleep in
+        // slices and stop when the socket errors or the process ends).
+        loop {
+            std::thread::sleep(Duration::from_millis(100));
+            if stream.set_nonblocking(true).is_err() {
+                return;
+            }
+            let mut b = [0u8; 1];
+            match stream.read(&mut b) {
+                Ok(0) => return,
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(_) => return,
+                Ok(_) => continue,
+            }
+        }
+    }
+    if delay.as_millis() > 0 {
+        std::thread::sleep(delay);
+    }
+    if let Some(raw) = raw {
+        let _ = stream.write_all(&raw);
+        let _ = stream.flush();
+        return;
+    }
     let resp = format!(
         "HTTP/1.1 {status} {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         reason_phrase(status)

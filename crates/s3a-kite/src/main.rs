@@ -35,6 +35,14 @@ fn main() {
         }
     };
     let host = Arc::new(Host::new(started, shutdown.clone()));
+    // Step 11: the background LRS retry worker (DD-51, AT-236) — one
+    // detached thread per Scholar host with --lrs-url. It exits when
+    // the host shuts down (or the process exits).
+    let _retry_worker = if host.config().lrs_url.is_some() {
+        Some(s3a_kite::retry::spawn_retry_worker(&host))
+    } else {
+        None
+    };
     // The native-window client (native-window builds without --headless).
     // It only performs the window_issue_select hook action; the window
     // rendering itself is not implemented in this build.
