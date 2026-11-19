@@ -510,11 +510,14 @@ fn crc32c(data: &[u8]) -> u32 {
 }
 
 /// Assert a withheld string is absent from a rendered frame: text runs,
-/// semantic labels, and the §5.8 pixel oracle. 8b form of the oracle: this
-/// renderer paints no text into the pixmap (real pixel paint is 8c), so the
-/// fixture pixmap is all zeros and byte-identical to any control pixmap
-/// produced the same way. 8c must replace the all-zero check with a real
-/// control comparison once paint lands.
+/// semantic labels, and paint liveness. 8c form: the pixmap is really
+/// painted now (rect-fill painter), so the all-zero check from 8b is
+/// replaced — every visible text-run rect must contain painted
+/// (non-background) pixels, proving paint happened. Absence-from-pixels
+/// for a withheld value then rests on text absence plus painter purity,
+/// which the dedicated two-archive §5.8 oracle tests in step8c_paint.rs
+/// prove (AT-11, AT-23, AT-67, AT-232). A run whose centre falls outside
+/// the pixmap (scrolled off) is skipped, not failed.
 pub fn assert_absent_from_frame(frame: &s3a_pack_kite::RenderFrame, needle: &str) {
     for run in &frame.text_runs {
         assert!(
@@ -530,10 +533,26 @@ pub fn assert_absent_from_frame(frame: &s3a_pack_kite::RenderFrame, needle: &str
             node.label
         );
     }
-    assert!(
-        frame.rgba.iter().all(|b| *b == 0),
-        "8b pixmap must paint no text into pixels (all zero); withheld string {needle}"
-    );
+    // Paint liveness: every visible run rect contains a painted pixel.
+    // TextRun rects are pixmap coordinates (§5.8). A painted pixel is
+    // neither background white nor the all-zero of an unpainted pixmap
+    // (either one alone would pass vacuously before paint lands).
+    let w = frame.width as usize;
+    let h = frame.height as usize;
+    for run in &frame.text_runs {
+        let cx = run.x as usize + run.width as usize / 2;
+        let cy = run.y as usize + run.height as usize / 2;
+        if cx >= w || cy >= h {
+            continue;
+        }
+        let idx = (cy * w + cx) * 4;
+        let px = &frame.rgba[idx..idx + 4];
+        assert!(
+            px != [255, 255, 255, 255] && px != [0, 0, 0, 0],
+            "text run {:?} at ({cx}, {cy}) has no painted pixel (paint missing?)",
+            run.text
+        );
+    }
 }
 
 /// Assert a string IS present in a frame's text runs or semantic labels.

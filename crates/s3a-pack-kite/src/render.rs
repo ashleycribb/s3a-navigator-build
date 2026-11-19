@@ -5,19 +5,20 @@
 //! layout kite cannot decode show metadata only. Withheld payloads do not
 //! appear in `text_runs`, `semantics`, pixels, or hit-test targets (DD-125).
 //!
-//! Pixel note (§5.8): this renderer paints no text into `rgba` (all-zero
-//! pixmap); real pixel paint is step 8c. The §5.8 render-model control check
-//! is therefore vacuous until 8c: fixture pixmap == control pixmap because
-//! neither paints text. The meaningful withheld-absence checks (text_runs,
-//! semantics, hit-test targets) are real and asserted.
+//! Pixel paint (§5.8, step 8c): `finish_frame` paints text runs as ink
+//! rects and semantic node fills (severity badges in the Okabe-Ito DD-07
+//! colours) into `rgba`; it is rect-fill paint, not glyph rasterization
+//! (no glyph rasterizer is wired in this tree). TextRun rects are pixmap
+//! coordinates; SemanticNode rects stay CSS pixels.
 
 use s3a_core::consent::{ConsentPurpose, ConsentRecord};
 use s3a_core::{MarkRecord, TileType};
 use s3a_edge::{
     DeviceIdentityRecord, EdgeConsentRecord, EquipmentEventRecord, TILE_TYPE_CONSENT,
-    TILE_TYPE_RECORD, TILE_TYPE_SEAL,
+    TILE_TYPE_PROVENANCE, TILE_TYPE_RECORD, TILE_TYPE_SEAL,
 };
 use s3a_engine::MmapReader;
+use sha2::{Digest, Sha256};
 
 use crate::consent::ConsentEval;
 use crate::open::Handle;
@@ -67,6 +68,15 @@ pub fn render_manifest(
     device_pixel_ratio: f64,
 ) -> Result<RenderFrame, KiteError> {
     let _ = scroll_y;
+    if matches!(
+        handle.kind_enum(),
+        Kind::Wiki | Kind::Html | Kind::Other
+    ) {
+        return Err(KiteError::new(
+            "view_mismatch",
+            "manifest is not a view for a page kind",
+        ));
+    }
     let (pix_w, pix_h) = pixmap_size(handle, width, height, device_pixel_ratio)?;
     let mut runs = Vec::new();
     let mut semantics = Vec::new();
@@ -152,6 +162,8 @@ pub fn render_manifest(
                 }
             }
             Kind::Unsupported => {}
+            // Page kinds are refused above (view_mismatch).
+            Kind::Wiki | Kind::Html | Kind::Other => unreachable!(),
         }
         // Verification label, quarantine banner, invalid list, withheld count.
         push_lines(
@@ -229,7 +241,7 @@ pub fn render_manifest(
             32,
         );
     }
-    let frame = finish_frame(pix_w, pix_h, runs, semantics);
+    let frame = finish_frame(pix_w, pix_h, runs, semantics, device_pixel_ratio);
     // First-view aliases share one normalized frame key ("first", §5.1).
     handle.store_frame("first", None, frame.clone());
     handle.store_frame("manifest", None, frame.clone());
@@ -260,6 +272,15 @@ pub fn render_warehouse(
             "render_warehouse is not defined for kind unsupported",
         ));
     }
+    if matches!(
+        handle.kind_enum(),
+        Kind::Wiki | Kind::Html | Kind::Other
+    ) {
+        return Err(KiteError::new(
+            "not_archive",
+            "render_warehouse is not defined for a page kind",
+        ));
+    }
     if !handle.proceeded() {
         return Err(KiteError::new(
             "view_mismatch",
@@ -288,7 +309,7 @@ pub fn render_warehouse(
             semantics.push(floor_node(floor, nx, ny, nw, nh));
         }
     }
-    let frame = finish_frame(pix_w, pix_h, runs, semantics);
+    let frame = finish_frame(pix_w, pix_h, runs, semantics, device_pixel_ratio);
     handle.store_frame("warehouse", None, frame.clone());
     Ok(frame)
 }
@@ -310,6 +331,15 @@ pub fn render_floor_detail(
             "render_floor_detail is not defined for kind unsupported",
         ));
     }
+    if matches!(
+        handle.kind_enum(),
+        Kind::Wiki | Kind::Html | Kind::Other
+    ) {
+        return Err(KiteError::new(
+            "not_archive",
+            "render_floor_detail is not defined for a page kind",
+        ));
+    }
     if !handle.proceeded() {
         return Err(KiteError::new(
             "view_mismatch",
@@ -323,10 +353,13 @@ pub fn render_floor_detail(
         ));
     }
     let (pix_w, pix_h) = pixmap_size(handle, width, height, device_pixel_ratio)?;
-    let (lines, mut semantics) = floor_detail_content(handle, floor_index)?;
     let mut runs = Vec::new();
     let mut y = 16i32;
     push_lines(&mut runs, &format!("floor {floor_index}"), &mut y);
+    // Severity badges align with their event rows: the first content line
+    // (withheld_count) is at this y, event r at y + 20*(1+r).
+    let content_y = y;
+    let (lines, mut semantics) = floor_detail_content(handle, floor_index, content_y)?;
     for line in &lines {
         push_lines(&mut runs, line, &mut y);
     }
@@ -345,7 +378,7 @@ pub fn render_floor_detail(
             opacity: None,
         },
     );
-    let frame = finish_frame(pix_w, pix_h, runs, semantics);
+    let frame = finish_frame(pix_w, pix_h, runs, semantics, device_pixel_ratio);
     handle.store_frame("floor-detail", Some(floor_index), frame.clone());
     Ok(frame)
 }
@@ -370,6 +403,15 @@ pub fn render_floor_transition(
         return Err(KiteError::new(
             "unsupported",
             "render_floor_transition is not defined for kind unsupported",
+        ));
+    }
+    if matches!(
+        handle.kind_enum(),
+        Kind::Wiki | Kind::Html | Kind::Other
+    ) {
+        return Err(KiteError::new(
+            "not_archive",
+            "render_floor_transition is not defined for a page kind",
         ));
     }
     if !handle.proceeded() {
@@ -422,15 +464,16 @@ pub fn render_floor_transition(
     };
     // The card shows floor-detail content (same text layer), so withheld
     // payloads stay absent here too (AT-11, AT-23).
-    let (lines, mut semantics) = floor_detail_content(handle, floor_index)?;
     let mut runs = Vec::new();
     let mut y = 16i32;
     push_lines(&mut runs, &format!("floor {floor_index}"), &mut y);
+    let content_y = y;
+    let (lines, mut semantics) = floor_detail_content(handle, floor_index, content_y)?;
     for line in &lines {
         push_lines(&mut runs, line, &mut y);
     }
     semantics.push(card);
-    let frame = finish_frame(pix_w, pix_h, runs, semantics);
+    let frame = finish_frame(pix_w, pix_h, runs, semantics, device_pixel_ratio);
     handle.store_frame("floor-transition", Some(floor_index), frame.clone());
     Ok(frame)
 }
@@ -440,30 +483,191 @@ pub fn render_floor_transition(
 fn floor_detail_content(
     handle: &Handle,
     floor_index: u32,
+    content_y: i32,
 ) -> Result<(Vec<String>, Vec<SemanticNode>), KiteError> {
     let reader = handle.reader()?;
     let eval = handle.consent_eval()?;
-    let floor = handle
-        .floors()
-        .into_iter()
+    let floors = handle.floors();
+    let floor = floors
+        .iter()
         .find(|f| f.index == floor_index)
-        .ok_or_else(|| KiteError::new("invalid_floor", format!("floor {floor_index} not found")))?;
+        .ok_or_else(|| KiteError::new("invalid_floor", format!("floor {floor_index} not found")))?
+        .clone();
     let mut lines: Vec<String> = Vec::new();
     let mut nodes: Vec<SemanticNode> = Vec::new();
     let withheld_here = eval.withheld_floor.get(&floor_index).copied().unwrap_or(0);
     lines.push(format!("withheld_count: {withheld_here}"));
 
     if reader.is_edge_archive() {
-        edge_floor_content(&reader, &floor, &eval, &mut lines, &mut nodes)?;
+        edge_floor_content(&reader, &floor, &floors, &eval, content_y, &mut lines, &mut nodes)?;
     } else {
-        hyper_floor_content(&reader, &floor, &eval, &mut lines)?;
+        hyper_floor_content(&reader, &floor, &floors, &eval, &mut lines)?;
     }
     Ok((lines, nodes))
+}
+
+/// A chunked-payload prefix (pin registry.md, Tiles 68/72): 32-byte key,
+/// `chunk_index` LE u32 at offset 32, `total_chunks` LE u32 at offset 36,
+/// then chunk data. A payload that does not parse as a chunk (shorter than
+/// 40 bytes, `total_chunks` 0, or `chunk_index >= total_chunks`) is not a
+/// chunked payload.
+struct ChunkPrefix {
+    key: [u8; 32],
+    index: u32,
+    total: u32,
+}
+
+fn parse_chunk_prefix(payload: &[u8]) -> Option<ChunkPrefix> {
+    if payload.len() < 40 {
+        return None;
+    }
+    let total = u32::from_le_bytes(payload[36..40].try_into().ok()?);
+    let index = u32::from_le_bytes(payload[32..36].try_into().ok()?);
+    if total == 0 || index >= total {
+        return None;
+    }
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&payload[..32]);
+    Some(ChunkPrefix { key, index, total })
+}
+
+fn chunk_metadata_line(prefix: &ChunkPrefix) -> String {
+    format!(
+        "chunk {}/{} blob_key {}",
+        prefix.index,
+        prefix.total,
+        hex_bytes(&prefix.key)
+    )
+}
+
+/// Reassemble one key's chunk portions (AT-32). `chunks` holds
+/// (chunk_index, data) for a single key; chunks are ordered by index, and
+/// every chunk 0..total-1 must be present, or reassembly fails (None).
+fn reassemble_chunks(chunks: &[(u32, Vec<u8>)], total: u32) -> Option<Vec<u8>> {
+    let mut doc = Vec::new();
+    for want in 0..total {
+        let (_, data) = chunks.iter().find(|(idx, _)| *idx == want)?;
+        doc.extend_from_slice(data);
+    }
+    Some(doc)
+}
+
+/// A chunk prefix is credible only if the reassembled content hashes to
+/// the key (SHA-256: AT-32 for PROVENANCE; the registry calls the BLOB key
+/// a "content hash"). A raw-text payload whose bytes 32..40 happen to form
+/// a plausible index/total — the AT-107 shape — fails this check and is
+/// treated as unprefixed. Without it, a 40+ byte text payload would be
+/// misread as a chunk and only its tail shown.
+fn credible_chunk(
+    payload: &[u8],
+    chunks: &[(u32, Vec<u8>)],
+) -> Option<(ChunkPrefix, Vec<u8>)> {
+    let prefix = parse_chunk_prefix(payload)?;
+    let content = reassemble_chunks(chunks, prefix.total)?;
+    let hash: [u8; 32] = Sha256::digest(&content).into();
+    if hash == prefix.key {
+        Some((prefix, content))
+    } else {
+        None
+    }
+}
+
+/// Push PROVENANCE document lines for one floor: metadata, then the
+/// chunk line when the 40-byte prefix parses, then the reassembled document
+/// for the key when every chunk is present (AT-32), else this chunk's own
+/// portion; without a prefix, the whole payload as text when valid UTF-8
+/// (AT-107). Never raw BLOB bytes.
+fn push_provenance_lines(
+    lines: &mut Vec<String>,
+    floor: &Floor,
+    payload: &[u8],
+    chunks: &[(u32, Vec<u8>)],
+) {
+    lines.push(metadata_line(floor));
+    match credible_chunk(payload, chunks) {
+        Some((prefix, doc)) => {
+            lines.push(chunk_metadata_line(&prefix));
+            push_text_lines(lines, &doc);
+        }
+        None => push_text_lines(lines, payload),
+    }
+}
+
+fn push_text_lines(lines: &mut Vec<String>, bytes: &[u8]) {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        for line in s.split('\n') {
+            if !line.is_empty() {
+                lines.push(line.to_string());
+            }
+        }
+    }
+}
+
+/// All chunk portions for one key on valid hyper-tile floors of the
+/// given tile type (`TileType::*` constants are `u32`).
+fn hyper_chunks(
+    reader: &MmapReader,
+    floors: &[Floor],
+    key: &[u8; 32],
+    want_type: u32,
+) -> Vec<(u32, Vec<u8>)> {
+    let valid: std::collections::HashSet<u32> = floors.iter().map(|f| f.index).collect();
+    let mut chunks = Vec::new();
+    for i in 0..reader.tile_count() {
+        if !valid.contains(&i) {
+            continue;
+        }
+        let Ok((header, payload)) = reader.try_get_tile_unverified(i as usize) else {
+            continue;
+        };
+        if header.tile_type != want_type {
+            continue;
+        }
+        let Some(prefix) = parse_chunk_prefix(payload) else {
+            continue;
+        };
+        if prefix.key != *key {
+            continue;
+        }
+        chunks.push((prefix.index, payload[40..].to_vec()));
+    }
+    chunks
+}
+
+/// All chunk portions for one key on valid Edge floors of the given type id.
+fn edge_chunks(
+    reader: &MmapReader,
+    floors: &[Floor],
+    key: &[u8; 32],
+    want_type_id: u16,
+) -> Vec<(u32, Vec<u8>)> {
+    let valid: std::collections::HashSet<u32> = floors.iter().map(|f| f.index).collect();
+    let mut chunks = Vec::new();
+    for i in 0..reader.tile_count() {
+        if !valid.contains(&i) {
+            continue;
+        }
+        let Ok((header, payload)) = reader.try_get_edge_tile_unverified(i as usize) else {
+            continue;
+        };
+        if header.type_id != want_type_id {
+            continue;
+        }
+        let Some(prefix) = parse_chunk_prefix(payload) else {
+            continue;
+        };
+        if prefix.key != *key {
+            continue;
+        }
+        chunks.push((prefix.index, payload[40..].to_vec()));
+    }
+    chunks
 }
 
 fn hyper_floor_content(
     reader: &MmapReader,
     floor: &Floor,
+    floors: &[Floor],
     eval: &ConsentEval,
     lines: &mut Vec<String>,
 ) -> Result<(), KiteError> {
@@ -514,21 +718,30 @@ fn hyper_floor_content(
             }
         }
         TileType::PROVENANCE => {
-            lines.push(metadata_line(floor));
             // PROVENANCE text is shown; raw captured bodies are not (the
             // payload here is the provenance document, not a BLOB body).
-            if let Ok(s) = std::str::from_utf8(payload) {
-                for line in s.split('\n') {
-                    if !line.is_empty() {
-                        lines.push(line.to_string());
-                    }
-                }
-            }
+            // Chunked PROVENANCE (40-byte prefix) shows the reassembled
+            // document for its key (AT-32); unprefixed payloads keep the
+            // AT-107 whole-payload-as-text shape.
+            let chunks = match parse_chunk_prefix(payload) {
+                Some(p) => hyper_chunks(reader, floors, &p.key, TileType::PROVENANCE),
+                None => Vec::new(),
+            };
+            push_provenance_lines(lines, floor, payload, &chunks);
         }
         _ => {
             // BLOB and every floor whose layout kite cannot decode: metadata
-            // only, never raw payload bytes (AT-107).
+            // only, never raw payload bytes (AT-107). A chunked BLOB shows
+            // its chunk index/total and key as metadata (AT-107 / §5.3
+            // item 5) — never the chunk bytes — but only when the chunk
+            // prefix is credible (reassembled content hashes to the key).
             lines.push(metadata_line(floor));
+            if let Some(prefix) = parse_chunk_prefix(payload) {
+                let chunks = hyper_chunks(reader, floors, &prefix.key, header.tile_type);
+                if let Some((prefix, _)) = credible_chunk(payload, &chunks) {
+                    lines.push(chunk_metadata_line(&prefix));
+                }
+            }
         }
     }
     Ok(())
@@ -537,7 +750,9 @@ fn hyper_floor_content(
 fn edge_floor_content(
     reader: &MmapReader,
     floor: &Floor,
+    floors: &[Floor],
     eval: &ConsentEval,
+    content_y: i32,
     lines: &mut Vec<String>,
     nodes: &mut Vec<SemanticNode>,
 ) -> Result<(), KiteError> {
@@ -557,7 +772,7 @@ fn edge_floor_content(
             if rec_size == 32 && record_count > 0 {
                 if eval.edge_shown {
                     let sz = std::mem::size_of::<EquipmentEventRecord>();
-                    let mut y = 16i32;
+                    let mut y = content_y + 20;
                     for r in 0..record_count as usize {
                         let rec: EquipmentEventRecord = bytemuck::pod_read_unaligned(
                             &payload[r * sz..(r + 1) * sz],
@@ -650,7 +865,24 @@ fn edge_floor_content(
         _ => {
             // Every Edge floor whose type is other than 64, 70, or 71 shows
             // metadata only, never raw or decoded payload fields (AT-232).
-            lines.push(metadata_line(floor));
+            // PROVENANCE (72) shows its reassembled document (AT-32); a
+            // chunked payload of any other type shows its chunk index/total
+            // and key as metadata — never the chunk bytes.
+            if type_id == TILE_TYPE_PROVENANCE {
+                let chunks = match parse_chunk_prefix(payload) {
+                    Some(p) => edge_chunks(reader, floors, &p.key, TILE_TYPE_PROVENANCE),
+                    None => Vec::new(),
+                };
+                push_provenance_lines(lines, floor, payload, &chunks);
+            } else {
+                lines.push(metadata_line(floor));
+                if let Some(prefix) = parse_chunk_prefix(payload) {
+                    let chunks = edge_chunks(reader, floors, &prefix.key, type_id);
+                    if let Some((prefix, _)) = credible_chunk(payload, &chunks) {
+                        lines.push(chunk_metadata_line(&prefix));
+                    }
+                }
+            }
         }
     }
     Ok(())
@@ -799,22 +1031,31 @@ fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn pixmap_size(
+pub(crate) fn pixmap_size(
     handle: &Handle,
     width: f64,
     height: f64,
     dpr: f64,
 ) -> Result<(u32, u32), KiteError> {
-    if !dpr.is_finite()
-        || dpr <= 0.0
-        || !width.is_finite()
-        || !height.is_finite()
-        || width <= 0.0
-        || height <= 0.0
-    {
+    // §5.8 / §5.2.1 catalogue (AT-141): non-finite w/h/dpr, or negative w/h,
+    // is invalid_param; w or h == 0, a well-typed dpr <= 0, or a pixmap
+    // product over max_frame_pixels is invalid_frame_size.
+    if !width.is_finite() || !height.is_finite() || !dpr.is_finite() {
         return Err(KiteError::new(
             "invalid_param",
-            "width, height, and device_pixel_ratio must be finite and > 0",
+            "width, height, and device_pixel_ratio must be finite numbers",
+        ));
+    }
+    if width < 0.0 || height < 0.0 {
+        return Err(KiteError::new(
+            "invalid_param",
+            "width and height must not be negative",
+        ));
+    }
+    if width == 0.0 || height == 0.0 || dpr <= 0.0 {
+        return Err(KiteError::new(
+            "invalid_frame_size",
+            "width and height must be > 0 and device_pixel_ratio must be > 0",
         ));
     }
     let pix_w = (width * dpr).ceil() as u32;
@@ -822,14 +1063,14 @@ fn pixmap_size(
     let product = (pix_w as u64).saturating_mul(pix_h as u64);
     if product > handle.max_frame_pixels() {
         return Err(KiteError::new(
-            "frame_too_large",
+            "invalid_frame_size",
             "pixmap width*height exceeds max_frame_pixels",
         ));
     }
     Ok((pix_w, pix_h))
 }
 
-fn push_lines(runs: &mut Vec<TextRun>, text: &str, y: &mut i32) {
+pub(crate) fn push_lines(runs: &mut Vec<TextRun>, text: &str, y: &mut i32) {
     for line in text.split('\n') {
         let w = (line.len() as u32).saturating_mul(8).max(8);
         push_run(runs, line, 16, *y, w, 16);
@@ -837,7 +1078,7 @@ fn push_lines(runs: &mut Vec<TextRun>, text: &str, y: &mut i32) {
     }
 }
 
-fn push_run(runs: &mut Vec<TextRun>, text: &str, x: i32, y: i32, width: u32, height: u32) {
+pub(crate) fn push_run(runs: &mut Vec<TextRun>, text: &str, x: i32, y: i32, width: u32, height: u32) {
     runs.push(TextRun {
         text: text.to_string(),
         x,
@@ -847,18 +1088,110 @@ fn push_run(runs: &mut Vec<TextRun>, text: &str, x: i32, y: i32, width: u32, hei
     });
 }
 
-fn finish_frame(
+/// Paint palette (step 8c, §5.8). Only the severity badge fills are SPEC
+/// (DD-07 / Okabe-Ito); the rest are implementation choices, logged in the
+/// step-8c test log. Paint is a pure function of (text_runs, semantics) plus
+/// CSS size and dpr — that purity is what makes the §5.8 control oracle
+/// testable. This is rect-fill paint, not glyph rasterization: no glyph
+/// rasterizer is wired in this tree (no vello/font crate is a dependency).
+pub const PAINT_BACKGROUND: [u8; 4] = [255, 255, 255, 255];
+const PAINT_INK: [u8; 4] = [0x22, 0x22, 0x22, 0xFF];
+const PAINT_BAY: [u8; 4] = [0xE8, 0xE8, 0xE8, 0xFF];
+const PAINT_BUTTON: [u8; 4] = [0xDD, 0xDD, 0xDD, 0xFF];
+const PAINT_CARD: [u8; 4] = [0xF2, 0xF2, 0xF2, 0xFF];
+const PAINT_LABEL: [u8; 4] = [0x99, 0x99, 0x99, 0xFF];
+
+/// Severity badge fills (DD-07, Okabe-Ito): 0 #0072B2, 1 #E69F00, 2 and 3
+/// #D55E00. Colour is never the only signal: the `severity: N` label and
+/// the non-colour category label are always present alongside the fill.
+fn severity_fill(severity: u8) -> [u8; 4] {
+    match severity {
+        0 => [0x00, 0x72, 0xB2, 0xFF],
+        1 => [0xE6, 0x9F, 0x00, 0xFF],
+        _ => [0xD5, 0x5E, 0x00, 0xFF],
+    }
+}
+
+fn fill_rect(rgba: &mut [u8], width: u32, height: u32, x: i32, y: i32, w: u32, h: u32, color: [u8; 4]) {
+    let x0 = x.max(0) as u32;
+    let y0 = y.max(0) as u32;
+    let x1 = (x as i64 + w as i64).clamp(0, width as i64) as u32;
+    let y1 = (y as i64 + h as i64).clamp(0, height as i64) as u32;
+    for py in y0..y1 {
+        for px in x0..x1 {
+            let idx = ((py * width + px) * 4) as usize;
+            rgba[idx..idx + 4].copy_from_slice(&color);
+        }
+    }
+}
+
+/// Scale a CSS rect to pixmap coordinates (round; exact at dpr 1.0/2.0).
+fn scale_rect(x: i32, y: i32, w: u32, h: u32, dpr: f64) -> (i32, i32, u32, u32) {
+    (
+        (x as f64 * dpr).round() as i32,
+        (y as f64 * dpr).round() as i32,
+        (w as f64 * dpr).round().max(0.0) as u32,
+        (h as f64 * dpr).round().max(0.0) as u32,
+    )
+}
+
+pub(crate) fn finish_frame(
     width: u32,
     height: u32,
     text_runs: Vec<TextRun>,
     semantics: Vec<SemanticNode>,
+    dpr: f64,
 ) -> RenderFrame {
-    let rgba = vec![0u8; (width as usize) * (height as usize) * 4];
+    // §5.8: TextRun coordinates are pixmap coordinates; SemanticNode
+    // coordinates stay CSS pixels. Runs are scaled here, once, so every
+    // caller passes CSS rects and the returned runs are pixmap rects.
+    let scaled_runs: Vec<TextRun> = text_runs
+        .into_iter()
+        .map(|r| {
+            let (x, y, w, h) = scale_rect(r.x, r.y, r.width, r.height, dpr);
+            TextRun {
+                text: r.text,
+                x,
+                y,
+                width: w,
+                height: h,
+            }
+        })
+        .collect();
+    let mut rgba = vec![0u8; (width as usize) * (height as usize) * 4];
+    for px in rgba.chunks_exact_mut(4) {
+        px.copy_from_slice(&PAINT_BACKGROUND);
+    }
+    // Paint order: text rects first, node fills on top, so a badge centre
+    // always samples its severity fill even where the badge overlaps its
+    // row's text rect.
+    for run in &scaled_runs {
+        fill_rect(&mut rgba, width, height, run.x, run.y, run.width, run.height, PAINT_INK);
+    }
+    for node in &semantics {
+        let (x, y, w, h) = scale_rect(node.x, node.y, node.width, node.height, dpr);
+        let color = match node.role.as_str() {
+            "label" => {
+                // A "severity: N" label is a severity badge (DD-07); any
+                // other label node gets the neutral label fill.
+                node.label
+                    .strip_prefix("severity: ")
+                    .and_then(|n| n.trim().parse::<u8>().ok())
+                    .map(severity_fill)
+                    .unwrap_or(PAINT_LABEL)
+            }
+            "floor" => PAINT_BAY,
+            "continue" | "select" => PAINT_BUTTON,
+            "card" => PAINT_CARD,
+            _ => continue,
+        };
+        fill_rect(&mut rgba, width, height, x, y, w, h, color);
+    }
     RenderFrame {
         rgba,
         width,
         height,
-        text_runs,
+        text_runs: scaled_runs,
         semantics,
     }
 }

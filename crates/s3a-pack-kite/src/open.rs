@@ -40,6 +40,10 @@ pub struct Handle {
     floors: Vec<Floor>,
     manifest: ManifestState,
     edge_header: Option<EdgeHeaderInfo>,
+    /// Step 10 (`open_path` + dossier YAML); always `None` for `open` of
+    /// bytes (AT-96). `render_page` paints no Select control while this is
+    /// `None`, even with `select_enabled` true (AT-144).
+    paper_identity: Option<String>,
     inner: RefCell<HandleInner>,
 }
 
@@ -63,6 +67,14 @@ impl Handle {
 
     pub(crate) fn first_view_enum(&self) -> FirstView {
         self.first_view
+    }
+
+    pub(crate) fn paper_identity(&self) -> Option<&str> {
+        self.paper_identity.as_deref()
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.bytes
     }
 
     pub(crate) fn max_frame_pixels(&self) -> u64 {
@@ -142,18 +154,18 @@ pub fn open(
     max_open_bytes: u64,
     pinned_keys: Vec<[u8; 32]>,
 ) -> Result<Handle, KiteError> {
-    let _ = name_hint;
     if bytes.len() as u64 > max_open_bytes {
         return Err(KiteError::new(
             "file_too_large",
             "input exceeds max_open_bytes",
         ));
     }
+    // §5.2.5 kind detection: bytes that do not begin with S3A_MAGIC are a
+    // document, classified by the name hint (extension, ASCII
+    // case-insensitive) — never an invalid_magic error (AT-95/AT-130).
     if bytes.len() < 4 || bytes[..4] != S3A_MAGIC {
-        return Err(KiteError::new(
-            "invalid_magic",
-            "bytes do not begin with S3A_MAGIC",
-        ));
+        let kind = classify_non_archive(&name_hint);
+        return Ok(page_handle(ctx, bytes, kind, max_frame_pixels));
     }
     let Some(header) = active_header(bytes) else {
         return Err(KiteError::new(
@@ -202,11 +214,68 @@ pub fn open(
         floors,
         manifest,
         edge_header,
+        paper_identity: None,
         inner: RefCell::new(HandleInner {
             proceeded: false,
             last_frames: Vec::new(),
         }),
     })
+}
+
+/// §5.2.5 steps 2–4: classify bytes that do not begin with S3A_MAGIC by the
+/// name hint's extension (ASCII case-insensitive). `.md` → wiki; `.html` /
+/// `.htm` → html; anything else (including no hint, and `.s3a`-named files
+/// whose bytes are not an archive) → other (DD-14).
+fn classify_non_archive(name_hint: &Option<String>) -> Kind {
+    let ext = name_hint.as_deref().and_then(|n| {
+        let base = n.rsplit(['/', '\\']).next().unwrap_or(n);
+        let ext = base.rsplit('.').next()?;
+        if base.contains('.') {
+            Some(ext)
+        } else {
+            None
+        }
+    });
+    match ext {
+        Some(e) if e.eq_ignore_ascii_case("md") => Kind::Wiki,
+        Some(e) if e.eq_ignore_ascii_case("html") || e.eq_ignore_ascii_case("htm") => Kind::Html,
+        _ => Kind::Other,
+    }
+}
+
+/// A document handle (wiki / html / other): first view is the page view.
+/// The stored verification report is an inert placeholder — the pack never
+/// verifies a document, and `verification_report` refuses page kinds with
+/// `not_archive` before the placeholder could be read.
+fn page_handle(
+    ctx: &KiteContext,
+    bytes: &[u8],
+    kind: Kind,
+    max_frame_pixels: u64,
+) -> Handle {
+    Handle {
+        kind,
+        first_view: FirstView::Page,
+        max_frame_pixels,
+        bytes: bytes.to_vec(),
+        derived: DerivedVerification {
+            report: KiteVerificationReport::unsigned_unsealed(),
+            highest_authentic: None,
+            has_seal_records: false,
+            unsigned_tail: Vec::new(),
+            tiles_total: 0,
+        },
+        clock: ctx.clock_arc(),
+        report: KiteVerificationReport::unsigned_unsealed(),
+        floors: Vec::new(),
+        manifest: ManifestState::Absent,
+        edge_header: None,
+        paper_identity: None,
+        inner: RefCell::new(HandleInner {
+            proceeded: false,
+            last_frames: Vec::new(),
+        }),
+    }
 }
 
 /// `open_verified` (§5.1): use the supplied report for label, seal_status,
@@ -222,17 +291,23 @@ pub fn open_verified(
     max_open_bytes: u64,
     report: KiteVerificationReport,
 ) -> Result<Handle, KiteError> {
-    let _ = name_hint;
     if bytes.len() as u64 > max_open_bytes {
         return Err(KiteError::new(
             "file_too_large",
             "input exceeds max_open_bytes",
         ));
     }
+    // §5.1: the bytes must be an archive kind. Bytes that do not begin with
+    // S3A_MAGIC classify as wiki / html / other by §5.2.5, and a report for
+    // them is `invalid_report` (AT-211) — not `invalid_magic`.
     if bytes.len() < 4 || bytes[..4] != S3A_MAGIC {
+        let kind = classify_non_archive(&name_hint);
         return Err(KiteError::new(
-            "invalid_magic",
-            "bytes do not begin with S3A_MAGIC",
+            "invalid_report",
+            format!(
+                "open_verified requires an archive kind, not {} (AT-211)",
+                kind.as_str()
+            ),
         ));
     }
     let Some(header) = active_header(bytes) else {
@@ -298,6 +373,7 @@ pub fn open_verified(
         floors,
         manifest,
         edge_header,
+        paper_identity: None,
         inner: RefCell::new(HandleInner {
             proceeded: false,
             last_frames: Vec::new(),
@@ -447,11 +523,14 @@ pub fn close(_handle: Handle) -> Result<(), KiteError> {
 }
 
 pub fn verification_report(handle: &Handle) -> Result<KiteVerificationReport, KiteError> {
-    if handle.kind_enum() == Kind::Unsupported {
-        return Err(KiteError::new(
-            "not_archive",
-            "verification_report is not defined for kind unsupported",
-        ));
+    match handle.kind_enum() {
+        Kind::Unsupported | Kind::Wiki | Kind::Html | Kind::Other => {
+            return Err(KiteError::new(
+                "not_archive",
+                "verification_report is not defined for a non-archive kind",
+            ));
+        }
+        Kind::HyperTile | Kind::Edge => {}
     }
     Ok(handle.report())
 }
@@ -462,6 +541,10 @@ pub fn proceed_to_warehouse(handle: &Handle) -> Result<(), KiteError> {
             "unsupported",
             "proceed is not defined for kind unsupported",
         )),
+        Kind::Wiki | Kind::Html | Kind::Other => Err(KiteError::new(
+            "not_archive",
+            "proceed is not defined for a page kind",
+        )),
         Kind::HyperTile | Kind::Edge => {
             handle.mark_proceeded();
             Ok(())
@@ -470,9 +553,9 @@ pub fn proceed_to_warehouse(handle: &Handle) -> Result<(), KiteError> {
 }
 
 /// `hit_test` (§5.1, §5.2.6). Error order: finite x/y, then floor-param
-/// errors (missing_param / invalid_param), then the §5.2.6 matrix
-/// (view_mismatch / not_archive / unsupported), then no_frame. Pure: does
-/// not change handle state (DD-97).
+/// errors (missing_param / invalid_param), then `invalid_view` for an
+/// unknown view, then the §5.2.6 matrix (view_mismatch / not_archive /
+/// unsupported), then no_frame. Pure: does not change handle state (DD-97).
 pub fn hit_test(
     handle: &Handle,
     view: &str,
@@ -499,40 +582,74 @@ pub fn hit_test(
             "floor must be None on a non-floor view",
         ));
     }
-    // §5.2.6 matrix.
-    let kind = handle.kind_enum();
-    if kind == Kind::Unsupported {
-        if view == "banner" || view == "manifest" || view == "header" {
-            return Ok(Hit::None);
-        }
+    // Unknown view first (§5.2.1 route-tail order).
+    const KNOWN_VIEWS: &[&str] = &[
+        "manifest",
+        "header",
+        "banner",
+        "warehouse",
+        "floor-detail",
+        "floor-transition",
+        "page",
+    ];
+    if !KNOWN_VIEWS.contains(&view) {
         return Err(KiteError::new(
-            "unsupported",
-            format!("hit_test view {view} is not valid for kind unsupported"),
+            "invalid_view",
+            format!("unknown hit_test view {view}"),
         ));
     }
-    match view {
-        "manifest" | "header" | "banner" => {}
-        "warehouse" => {
-            if !handle.proceeded() {
+    // §5.2.6 matrix.
+    let kind = handle.kind_enum();
+    match kind {
+        Kind::Unsupported => {
+            if view == "banner" || view == "manifest" || view == "header" {
+                return Ok(Hit::None);
+            }
+            if view == "page" {
+                return Err(KiteError::new(
+                    "view_mismatch",
+                    "page is not a view for kind unsupported",
+                ));
+            }
+            return Err(KiteError::new(
+                "unsupported",
+                format!("hit_test view {view} is not valid for kind unsupported"),
+            ));
+        }
+        Kind::Wiki | Kind::Html | Kind::Other => {
+            if view == "page" {
+                // Fall through to the page frame check below.
+            } else if view == "warehouse" || is_floor_view {
+                return Err(KiteError::new(
+                    "not_archive",
+                    format!("hit_test view {view} is not defined for a page kind"),
+                ));
+            } else {
+                return Err(KiteError::new(
+                    "view_mismatch",
+                    format!("hit_test view {view} is not the current view for a page kind"),
+                ));
+            }
+        }
+        Kind::HyperTile | Kind::Edge => {
+            if view == "page" {
+                return Err(KiteError::new(
+                    "view_mismatch",
+                    "page is not a view for an archive kind",
+                ));
+            }
+            if view == "warehouse" && !handle.proceeded() {
                 return Err(KiteError::new(
                     "view_mismatch",
                     "warehouse is not the current view until proceed_to_warehouse",
                 ));
             }
-        }
-        "floor-detail" | "floor-transition" => {
-            if !handle.proceeded() {
+            if is_floor_view && !handle.proceeded() {
                 return Err(KiteError::new(
                     "view_mismatch",
                     "floor views are not the current view until proceed_to_warehouse",
                 ));
             }
-        }
-        _ => {
-            return Err(KiteError::new(
-                "invalid_view",
-                format!("unknown hit_test view {view}"),
-            ));
         }
     }
     if is_floor_view {
@@ -544,6 +661,15 @@ pub fn hit_test(
             "no_frame",
             "no prior frame for that view and floor",
         ));
+    }
+    if view == "page" {
+        // A page hit needs a prior page frame.
+        if handle.frame("page", None).is_none() {
+            return Err(KiteError::new(
+                "no_frame",
+                "no prior page frame",
+            ));
+        }
     }
     // First-view aliases share one normalized frame key ("first").
     let frame_view = match view {
@@ -562,6 +688,20 @@ pub fn hit_test(
                     "floor" => {
                         if let Some(n) = node.floor {
                             return Ok(Hit::Floor(n));
+                        }
+                    }
+                    "select" => {
+                        if let Some(paper_id) = &node.paper_id {
+                            return Ok(Hit::Select {
+                                paper_id: paper_id.clone(),
+                            });
+                        }
+                    }
+                    "link" => {
+                        if let Some(href) = &node.href {
+                            return Ok(Hit::Link {
+                                href: href.clone(),
+                            });
                         }
                     }
                     _ => {}
@@ -596,6 +736,7 @@ fn unsupported_handle(max_frame_pixels: u64, banner: String) -> Handle {
         floors: Vec::new(),
         manifest: ManifestState::Unsupported { banner },
         edge_header: None,
+        paper_identity: None,
         inner: RefCell::new(HandleInner {
             proceeded: false,
             last_frames: Vec::new(),

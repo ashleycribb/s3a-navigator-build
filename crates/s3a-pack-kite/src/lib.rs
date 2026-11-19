@@ -9,6 +9,7 @@ mod consent;
 mod context;
 mod error;
 mod open;
+mod page;
 mod render;
 mod report;
 mod types;
@@ -20,9 +21,10 @@ pub use error::KiteError;
 pub use open::{
     close, hit_test, open, open_verified, proceed_to_warehouse, verification_report, Handle,
 };
+pub use page::render_page;
 pub use render::{
     render_floor_detail, render_floor_transition, render_manifest, render_warehouse,
-    RenderFrame, SemanticNode, TextRun,
+    RenderFrame, SemanticNode, TextRun, PAINT_BACKGROUND,
 };
 pub use report::KiteVerificationReport;
 pub use types::Hit;

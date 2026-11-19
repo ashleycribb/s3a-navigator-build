@@ -15,3 +15,7 @@ s3a-edge = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45f
 s3a-core = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
 sha2 = "0.10"
 bytemuck = { version = "1.18", features = ["derive"] }
+# Step 8c (DD-13): CommonMark parsing for render_page. Default options only
+# (no tables — tables are AT-233 / Step 12); raw HTML is ignored by the
+# renderer, not by the parser.
+pulldown-cmark = "0.13"

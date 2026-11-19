@@ -13,6 +13,12 @@ pub(crate) enum Kind {
     HyperTile,
     Edge,
     Unsupported,
+    /// Step 8c (§5.2.5): a Markdown document.
+    Wiki,
+    /// Step 8c (§5.2.5): a local HTML document.
+    Html,
+    /// Step 8c (§5.2.5, DD-14): anything else (PDF, extensionless, ...).
+    Other,
 }
 
 impl Kind {
@@ -21,6 +27,9 @@ impl Kind {
             Self::HyperTile => "hyper-tile",
             Self::Edge => "edge",
             Self::Unsupported => "unsupported",
+            Self::Wiki => "wiki",
+            Self::Html => "html",
+            Self::Other => "other",
         }
     }
 }
@@ -30,6 +39,8 @@ pub(crate) enum FirstView {
     Manifest,
     Header,
     Banner,
+    /// Step 8c (§5.1): wiki / html / other open on the page view.
+    Page,
 }
 
 impl FirstView {
@@ -38,6 +49,7 @@ impl FirstView {
             Self::Manifest => "manifest",
             Self::Header => "header",
             Self::Banner => "banner",
+            Self::Page => "page",
         }
     }
 }
