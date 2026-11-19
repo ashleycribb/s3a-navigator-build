@@ -119,6 +119,10 @@ pub enum HyperTile {
     Provenance(String),
     /// Raw payload with an explicit record_count (BLOB, type 82, ...).
     Raw(u32, Vec<u8>, u32),
+    /// Raw payload with a caller-built header (e.g. a v2 record_layout_version).
+    RawWithHeader(HyperTileHeader, Vec<u8>),
+    /// Enable an addon bit (e.g. ADDON_EDU) before the following tiles.
+    Addon(u32),
 }
 
 pub struct HyperFixture {
@@ -132,6 +136,10 @@ pub fn build_hyper(tiles: Vec<HyperTile>, seal: bool) -> HyperFixture {
     let mut w = TileWriter::create(&raw_path).expect("TileWriter::create");
     let mut tile_ids = Vec::new();
     for tile in &tiles {
+        if let HyperTile::Addon(mask) = tile {
+            w.enable_addon(*mask).expect("enable addon");
+            continue;
+        }
         let id = match tile {
             HyperTile::Consent(recs) => w
                 .write_hyper_tile(TileType::CONSENT, recs, None, None)
@@ -145,12 +153,17 @@ pub fn build_hyper(tiles: Vec<HyperTile>, seal: bool) -> HyperFixture {
             HyperTile::Provenance(text) => w
                 .write_hyper_tile(TileType::PROVENANCE, text.as_bytes(), None, None)
                 .expect("write provenance tile"),
+            HyperTile::RawWithHeader(h, payload) => {
+                w.write_raw_hyper_tile(h, payload)
+                    .expect("write raw tile with header")
+            }
             HyperTile::Raw(type_id, payload, record_count) => {
                 let mut h = HyperTileHeader::new(0, *type_id);
                 h.record_count = *record_count;
                 w.write_raw_hyper_tile(&h, payload)
                     .expect("write raw tile")
             }
+            HyperTile::Addon(_) => unreachable!("addon handled above"),
         };
         tile_ids.push(id);
     }

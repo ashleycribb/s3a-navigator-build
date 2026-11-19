@@ -1,0 +1,23 @@
+[package]
+name = "kite-host-tests"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Out-of-workspace host-linking tests (DD-121). Spawns the s3a-kite host binary and speaks the Host HTTP API."
+publish = false
+
+[dev-dependencies]
+# Fixture builders (step 8b): engine/edge/core at the same pin as the pack.
+s3a-pack-kite = { path = "../crates/s3a-pack-kite" }
+s3a-core = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
+s3a-engine = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
+s3a-edge = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773", features = ["sign"] }
+s3a-pack-scholar = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
+serde_json = "1"
+base64 = "0.22"
+libc = "0.2"
+bytemuck = "1"
+crc32c = "0.6"
+sha2 = "0.10"
+# TLS test client (accept-any verifier for the host's test cert).
+rustls = { version = "0.23", features = ["ring"] }

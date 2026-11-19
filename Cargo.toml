@@ -7,6 +7,7 @@ exclude = [
     "crates/s3a-kite",
     "crates/s3a-pack-kite",
     "kite-pack-tests",
+    "kite-host-tests",
     "reader-pack-tests",
     "layout-tests",
     "vendor/s3a-Navigator",

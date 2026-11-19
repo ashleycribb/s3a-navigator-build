@@ -13,6 +13,11 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 s3a-engine = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
 s3a-edge = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773", features = ["sign"] }
 s3a-core = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
+# Step 9: Scholar record types for open_path identity (via front matter) and
+# scholar_paper_records (type-12 v1/v2 decode).
+s3a-pack-scholar = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
+crc32c = "0.6"
+serde_json = "1"
 sha2 = "0.10"
 bytemuck = { version = "1.18", features = ["derive"] }
 # Step 8c (DD-13): CommonMark parsing for render_page. Default options only

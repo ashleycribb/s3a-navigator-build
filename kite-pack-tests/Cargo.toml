@@ -12,8 +12,12 @@ s3a-pack-kite = { path = "../crates/s3a-pack-kite" }
 s3a-core = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
 s3a-engine = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
 s3a-edge = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773", features = ["sign"] }
+# Step 9: Scholar record types for type-12 fixtures (AcademicPaperRecord,
+# ScholarPaperBlobHeader) and hash_iri.
+s3a-pack-scholar = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
 # AT-10 CLI oracle parses `s3a-cli tour --json`.
 serde_json = "1"
 # Fixture builders hash payloads and read/write records as bytes.
 bytemuck = "1"
+crc32c = "0.6"
 sha2 = "0.10"

@@ -3,5 +3,38 @@ name = "s3a-kite"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "s3a-kite host library and binary. Excluded from the workspace until the pack exists (DD-121)."
+description = "S3A Navigator host binary and Host HTTP API (SPEC v24.4 §5.2). Excluded from the workspace until it joins (DD-121)."
 publish = false
+
+[[bin]]
+name = "s3a-kite"
+path = "src/main.rs"
+
+[lib]
+name = "s3a_kite"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[features]
+default = []
+# Native-window client (DD-60, AT-125). Without this feature --headless is
+# always required and there is no window client.
+native-window = []
+# In-process fault-injection hooks (§5.2.7, DD-151). Not in the default set.
+test_hooks = []
+# Loopback fixture servers for egress tests (§5.2.4, AT-88/AT-109).
+egress_test = []
+
+[dependencies]
+s3a-pack-kite = { path = "../s3a-pack-kite" }
+s3a-engine = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
+s3a-core = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
+s3a-pack-scholar = { git = "https://github.com/ashleycribb/s3a-storage", rev = "2cf2b45fb1a3375735687252d93a612fb6c9f773" }
+# TLS server (hand-rolled std-thread HTTP server + rustls; no tokio/hyper,
+# so the SPEC's connection-level behaviours stay exactly controllable).
+rustls = { version = "0.23", features = ["ring"] }
+png = "0.18"
+serde_json = "1"
+base64 = "0.22"
+libc = "0.2"
+sha2 = "0.10"

@@ -8,6 +8,7 @@
 mod consent;
 mod context;
 mod error;
+mod front_matter;
 mod open;
 mod page;
 mod render;
@@ -18,8 +19,10 @@ mod verify;
 pub use consent::{ConsentClass, ConsentEval};
 pub use context::{Clock, KiteContext, ProcessClock, REQUIRED_UA_FONTS};
 pub use error::KiteError;
+pub use front_matter::{parse_front_matter, parse_front_matter_bytes, FrontMatter};
 pub use open::{
-    close, hit_test, open, open_verified, proceed_to_warehouse, verification_report, Handle,
+    close, hit_test, open, open_path, open_verified, proceed_to_warehouse,
+    scholar_paper_records, verification_report, Handle, ScholarRoots,
 };
 pub use page::render_page;
 pub use render::{

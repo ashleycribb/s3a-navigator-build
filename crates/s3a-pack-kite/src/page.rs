@@ -545,7 +545,7 @@ pub fn render_page(
     // Select control (AT-144): top-right, only when enabled AND a paper
     // identity exists. `open` of bytes yields paper_identity None, so the
     // control is never painted in 8c; the positive case needs open_path
-    // (Step 10, AT-101).
+    // (Step 9, AT-101).
     if select_enabled {
         if let Some(paper_id) = handle.paper_identity() {
             let sx = width as i32 - 136;

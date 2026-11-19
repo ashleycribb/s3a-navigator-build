@@ -9,6 +9,11 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
+use std::fs::File;
+use std::mem::ManuallyDrop;
+use std::os::unix::fs::FileExt;
+use std::os::unix::io::{FromRawFd, RawFd};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use s3a_core::{
@@ -17,10 +22,14 @@ use s3a_core::{
     HYPER_TILE_SIZE, S3A_MAGIC,
 };
 use s3a_engine::{verify_header_slot, MmapReader};
+use s3a_pack_scholar::{
+    records::AcademicPaperRecord, ScholarPaperBlobHeader, ScholarPaperRecord, ScholarTileType,
+};
 use sha2::{Digest, Sha256};
 
 use crate::consent::{evaluate, ConsentEval, EvalInputs};
 use crate::context::Clock;
+use crate::front_matter::parse_front_matter_bytes;
 use crate::render::{cache_frame, last_frame, RenderFrame};
 use crate::report::KiteVerificationReport;
 use crate::types::{EdgeDeviceInfo, EdgeHeaderInfo, FirstView, Floor, Hit, Kind, ManifestState};
@@ -40,7 +49,7 @@ pub struct Handle {
     floors: Vec<Floor>,
     manifest: ManifestState,
     edge_header: Option<EdgeHeaderInfo>,
-    /// Step 10 (`open_path` + dossier YAML); always `None` for `open` of
+    /// Step 9 (`open_path` + dossier YAML); always `None` for `open` of
     /// bytes (AT-96). `render_page` paints no Select control while this is
     /// `None`, even with `select_enabled` true (AT-144).
     paper_identity: Option<String>,
@@ -69,7 +78,10 @@ impl Handle {
         self.first_view
     }
 
-    pub(crate) fn paper_identity(&self) -> Option<&str> {
+    /// The paper identity for a handle opened from a path (§5.1 FFI).
+    /// `Some` only for a qualifying dossier opened via `open_path`; always
+    /// `None` for `open` of bytes (AT-96).
+    pub fn paper_identity(&self) -> Option<&str> {
         self.paper_identity.as_deref()
     }
 
@@ -154,6 +166,18 @@ pub fn open(
     max_open_bytes: u64,
     pinned_keys: Vec<[u8; 32]>,
 ) -> Result<Handle, KiteError> {
+    open_impl(ctx, bytes, name_hint, max_frame_pixels, max_open_bytes, pinned_keys, None)
+}
+
+fn open_impl(
+    ctx: &KiteContext,
+    bytes: &[u8],
+    name_hint: Option<String>,
+    max_frame_pixels: u64,
+    max_open_bytes: u64,
+    pinned_keys: Vec<[u8; 32]>,
+    paper_identity: Option<String>,
+) -> Result<Handle, KiteError> {
     if bytes.len() as u64 > max_open_bytes {
         return Err(KiteError::new(
             "file_too_large",
@@ -165,7 +189,7 @@ pub fn open(
     // case-insensitive) — never an invalid_magic error (AT-95/AT-130).
     if bytes.len() < 4 || bytes[..4] != S3A_MAGIC {
         let kind = classify_non_archive(&name_hint);
-        return Ok(page_handle(ctx, bytes, kind, max_frame_pixels));
+        return Ok(page_handle(ctx, bytes, kind, max_frame_pixels, paper_identity));
     }
     let Some(header) = active_header(bytes) else {
         return Err(KiteError::new(
@@ -214,12 +238,315 @@ pub fn open(
         floors,
         manifest,
         edge_header,
-        paper_identity: None,
+        paper_identity,
         inner: RefCell::new(HandleInner {
             proceeded: false,
             last_frames: Vec::new(),
         }),
     })
+}
+
+/// Scholar roots for `open_path` (§5.1 FFI, DD-139).
+#[derive(Debug, Clone)]
+pub struct ScholarRoots {
+    /// Canonical wiki root (absolute).
+    pub wiki_root: PathBuf,
+    /// Canonical corpus root (absolute).
+    pub corpus_root: PathBuf,
+    /// True iff a qualifying item-1 wiki candidate exists at the same
+    /// relative path (the wiki version wins; §5.5 item 1). Computed by the
+    /// caller; the pack does no path I/O beyond the already-open fd.
+    pub shadowed_by_wiki: bool,
+}
+
+/// `open_path` (§5.1 FFI, DD-146, AT-101): open bytes from a file descriptor
+/// the caller has already authorized. Reads from `fd` only, with `pread`
+/// from offset 0, at most `max_open_bytes` + 1 bytes (`file_too_large` if
+/// more arrive). Never closes `fd`, never reopens `canonical_path` by name,
+/// never `lstat`s or `openat`s that path again. `name_hint` is the optional
+/// `/v1/open` `name`; when `None` the basename of `canonical_path` is used
+/// for kind detection. `paper_identity` is `Some(stem)` only with
+/// `scholar_roots: Some` + `shadowed_by_wiki` false + a qualifying dossier
+/// (see `compute_identity`); otherwise `None`.
+pub fn open_path(
+    ctx: &KiteContext,
+    fd: RawFd,
+    canonical_path: &str,
+    validated_root: &Path,
+    max_frame_pixels: u64,
+    max_open_bytes: u64,
+    pinned_keys: Vec<[u8; 32]>,
+    scholar_roots: Option<&ScholarRoots>,
+    name_hint: Option<String>,
+) -> Result<Handle, KiteError> {
+    if fd < 0 {
+        return Err(KiteError::new("invalid_param", "open_path: fd is negative"));
+    }
+    let canonical = Path::new(canonical_path);
+    if !canonical.is_absolute() || canonical.strip_prefix(validated_root).is_err() {
+        return Err(KiteError::new(
+            "invalid_param",
+            "open_path: canonical_path is outside validated_root",
+        ));
+    }
+    // Bounded pread from offset 0 on the caller's fd; the fd is not closed
+    // (ManuallyDrop) and its offset is left untouched (pread, not read).
+    let file = unsafe { ManuallyDrop::new(File::from_raw_fd(fd)) };
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut offset: u64 = 0;
+    let mut chunk = [0u8; 65536];
+    loop {
+        let n = file
+            .read_at(&mut chunk, offset)
+            .map_err(|e| KiteError::new("unknown", format!("open_path: pread failed: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        offset += n as u64;
+        if offset > max_open_bytes + 1 {
+            return Err(KiteError::new(
+                "file_too_large",
+                "input exceeds max_open_bytes",
+            ));
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+    }
+    let name = name_hint.or_else(|| {
+        canonical
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+    });
+    let identity = compute_identity(canonical, scholar_roots, &bytes);
+    open_impl(ctx, &bytes, name, max_frame_pixels, max_open_bytes, pinned_keys, identity)
+}
+
+/// Decide `paper_identity` for an `open_path` (§5.5 dossier checks).
+/// `Some(stem)` only when: `scholar_roots` is `Some`, `shadowed_by_wiki`
+/// is false, the canonical path is `papers/SRC-*.md` under the wiki or
+/// corpus root, and the front matter (read from the same fd bytes) is
+/// present, parseable UTF-8 YAML whose `source_id`, when present, equals
+/// the stem. No path I/O.
+fn compute_identity(
+    canonical: &Path,
+    scholar_roots: Option<&ScholarRoots>,
+    bytes: &[u8],
+) -> Option<String> {
+    let roots = scholar_roots?;
+    if roots.shadowed_by_wiki {
+        return None;
+    }
+    let rel = canonical
+        .strip_prefix(&roots.wiki_root)
+        .ok()
+        .or_else(|| canonical.strip_prefix(&roots.corpus_root).ok())?;
+    let mut comps = rel.components();
+    if !matches!(comps.next(), Some(Component::Normal(s)) if s == "papers") {
+        return None;
+    }
+    let file = match comps.next() {
+        Some(Component::Normal(s)) => s.to_str()?,
+        _ => return None,
+    };
+    if comps.next().is_some() {
+        return None;
+    }
+    let (stem, ext) = file.rsplit_once('.')?;
+    if !ext.eq_ignore_ascii_case("md") || !stem.starts_with("SRC-") {
+        return None;
+    }
+    let fm = parse_front_matter_bytes(bytes)?;
+    if let Some(source_id) = fm.source_id.as_deref() {
+        if source_id != stem {
+            return None;
+        }
+    }
+    Some(stem.to_string())
+}
+
+/// Candidate paper identities from a handle's type-12 floors (SPEC §5.5
+/// item 2, AT-225 pack half). Returns the decimal `paper_id` of each live
+/// (non-tombstone), un-withheld v1 `AcademicPaperRecord` and the JSON `key`
+/// of each complete v2 record: v1 records first in tile order, then v2
+/// papers in chunk-hash order. (SPEC item 2 names `AcademicPaperRecord`,
+/// the v1 POD; a v2 record's identity is its JSON `key` — the only identity
+/// a v2 record carries. If the SPEC later rules otherwise, this is the
+/// place to change.) Empty for quarantined files and non-archive kinds. A
+/// corrupt type-12 tile is an error (the host treats that as a silent skip
+/// of the file, AT-218); invalid floors are skipped.
+pub fn scholar_paper_records(handle: &Handle) -> Result<Vec<String>, KiteError> {
+    if handle.kind_enum() != Kind::HyperTile {
+        return Ok(Vec::new());
+    }
+    if handle.report().status == "quarantined" {
+        return Ok(Vec::new());
+    }
+    let reader = handle.reader()?;
+    let eval = handle.consent_eval()?;
+    let tiles_total = reader.tile_count();
+    let mut ids: Vec<String> = Vec::new();
+    // v2 chunks grouped by sha256_hash (mirror s3a-pack-scholar
+    // get_from_tiles); `order` is first-seen order.
+    type Chunks = (
+        ScholarPaperBlobHeader,
+        std::collections::BTreeMap<u16, Vec<u8>>,
+    );
+    let mut chunks_by_hash: std::collections::BTreeMap<[u8; 32], Chunks> =
+        std::collections::BTreeMap::new();
+    let mut order: Vec<[u8; 32]> = Vec::new();
+    for idx in 0..tiles_total {
+        if !handle.is_valid_floor(idx) {
+            continue;
+        }
+        let Ok((hdr, payload)) = reader.try_get_tile(idx as usize) else {
+            continue;
+        };
+        if hdr.tile_type != ScholarTileType::ACADEMIC_PAPERS {
+            continue;
+        }
+        if s3a_engine::check_tile_header_crc(&hdr).is_err() {
+            return Err(KiteError::new(
+                "unknown",
+                format!("Tile 12 (id {}) header CRC mismatch", hdr.tile_id),
+            ));
+        }
+        let plen = hdr.payload_bytes as usize;
+        if plen > payload.len() {
+            return Err(KiteError::new(
+                "unknown",
+                format!(
+                    "Tile 12 (id {}) payload_bytes {} exceeds tile payload {}",
+                    hdr.tile_id,
+                    plen,
+                    payload.len()
+                ),
+            ));
+        }
+        let data = &payload[..plen];
+        if !(s3a_engine::is_legacy_tile(&hdr) && hdr.data_crc32 == 0)
+            && crc32c::crc32c(data) != hdr.data_crc32
+        {
+            return Err(KiteError::new(
+                "unknown",
+                format!("Tile 12 (id {}) payload CRC mismatch", hdr.tile_id),
+            ));
+        }
+        if hdr.record_layout_version <= 1 {
+            let records = bytemuck::try_cast_slice::<u8, AcademicPaperRecord>(data)
+                .map_err(|e| {
+                    KiteError::new(
+                        "unknown",
+                        format!("Tile 12 v1 payload is not 64-byte records: {e}"),
+                    )
+                })?;
+            for (r, rec) in records.iter().enumerate() {
+                if rec.is_tombstone() {
+                    continue;
+                }
+                if eval.mark_withheld.contains(&(idx, r as u32)) {
+                    continue;
+                }
+                ids.push(rec.paper_id.to_string());
+            }
+        } else if hdr.record_layout_version == 2 {
+            let bsz = std::mem::size_of::<ScholarPaperBlobHeader>();
+            if data.len() < bsz {
+                return Err(KiteError::new(
+                    "unknown",
+                    format!("Tile 12 (id {}) v2 payload shorter than blob header", hdr.tile_id),
+                ));
+            }
+            let blob_hdr: ScholarPaperBlobHeader =
+                bytemuck::pod_read_unaligned(&data[..bsz]);
+            let chunk_len = blob_hdr.chunk_bytes as usize;
+            if bsz.checked_add(chunk_len) != Some(data.len()) {
+                return Err(KiteError::new(
+                    "unknown",
+                    format!(
+                        "Tile 12 (id {}) chunk_bytes {} inconsistent with payload_bytes {}",
+                        hdr.tile_id,
+                        chunk_len,
+                        data.len()
+                    ),
+                ));
+            }
+            if blob_hdr.total_chunks == 0
+                || blob_hdr.chunk_index >= blob_hdr.total_chunks
+                || chunk_len > blob_hdr.total_bytes as usize
+            {
+                return Err(KiteError::new(
+                    "unknown",
+                    "Tile 12 chunk index/count/length inconsistent".to_string(),
+                ));
+            }
+            let chunk_data = &data[bsz..];
+            if crc32c::crc32c(chunk_data) != blob_hdr.chunk_crc32 {
+                return Err(KiteError::new(
+                    "unknown",
+                    format!("Tile 12 (id {}) chunk CRC mismatch", hdr.tile_id),
+                ));
+            }
+            if !chunks_by_hash.contains_key(&blob_hdr.sha256_hash) {
+                order.push(blob_hdr.sha256_hash);
+            }
+            let entry = chunks_by_hash
+                .entry(blob_hdr.sha256_hash)
+                .or_insert_with(|| (blob_hdr, std::collections::BTreeMap::new()));
+            if entry.0.total_chunks != blob_hdr.total_chunks
+                || entry.0.total_bytes != blob_hdr.total_bytes
+            {
+                return Err(KiteError::new(
+                    "unknown",
+                    "Tile 12 chunks of one paper disagree on totals".to_string(),
+                ));
+            }
+            entry.1.insert(blob_hdr.chunk_index, chunk_data.to_vec());
+        } else {
+            return Err(KiteError::new(
+                "unknown",
+                format!(
+                    "Tile 12 (id {}) has unsupported layout version {}",
+                    hdr.tile_id, hdr.record_layout_version
+                ),
+            ));
+        }
+    }
+    // Reassemble v2 papers (mirror s3a-pack-scholar get_from_tiles).
+    for sha in order {
+        let (blob_hdr, chunk_map) = chunks_by_hash.remove(&sha).expect("ordered key present");
+        if chunk_map.len() != blob_hdr.total_chunks as usize {
+            return Err(KiteError::new(
+                "unknown",
+                format!(
+                    "Tile 12 paper is missing chunks ({} of {})",
+                    chunk_map.len(),
+                    blob_hdr.total_chunks
+                ),
+            ));
+        }
+        let mut full_bytes = Vec::with_capacity(blob_hdr.total_bytes as usize);
+        for (_, data) in chunk_map {
+            full_bytes.extend_from_slice(&data);
+        }
+        if full_bytes.len() != blob_hdr.total_bytes as usize {
+            return Err(KiteError::new(
+                "unknown",
+                "Tile 12 reassembled length != total_bytes".to_string(),
+            ));
+        }
+        let actual_sha: [u8; 32] = Sha256::digest(&full_bytes).into();
+        if actual_sha != sha {
+            return Err(KiteError::new(
+                "unknown",
+                "Tile 12 reassembled paper SHA-256 mismatch".to_string(),
+            ));
+        }
+        let paper = serde_json::from_slice::<ScholarPaperRecord>(&full_bytes)
+            .map_err(|e| {
+                KiteError::new("unknown", format!("Tile 12 paper JSON invalid: {e}"))
+            })?;
+        ids.push(paper.key);
+    }
+    Ok(ids)
 }
 
 /// §5.2.5 steps 2–4: classify bytes that do not begin with S3A_MAGIC by the
@@ -252,6 +579,7 @@ fn page_handle(
     bytes: &[u8],
     kind: Kind,
     max_frame_pixels: u64,
+    paper_identity: Option<String>,
 ) -> Handle {
     Handle {
         kind,
@@ -270,7 +598,7 @@ fn page_handle(
         floors: Vec::new(),
         manifest: ManifestState::Absent,
         edge_header: None,
-        paper_identity: None,
+        paper_identity,
         inner: RefCell::new(HandleInner {
             proceeded: false,
             last_frames: Vec::new(),
@@ -680,32 +1008,37 @@ pub fn hit_test(
         // Back-compat: frames stored under the literal view name.
         handle.frame(view, None)
     });
-    if let Some(frame) = frame {
-        for node in &frame.semantics {
-            if point_in_css(x, y, node.x, node.y, node.width, node.height) {
-                match node.role.as_str() {
-                    "continue" => return Ok(Hit::Continue),
-                    "floor" => {
-                        if let Some(n) = node.floor {
-                            return Ok(Hit::Floor(n));
-                        }
+    // AT-118: a hit-test needs a prior frame for (handle, view, floor).
+    let Some(frame) = frame else {
+        return Err(KiteError::new(
+            "no_frame",
+            "no prior frame for that view",
+        ));
+    };
+    for node in &frame.semantics {
+        if point_in_css(x, y, node.x, node.y, node.width, node.height) {
+            match node.role.as_str() {
+                "continue" => return Ok(Hit::Continue),
+                "floor" => {
+                    if let Some(n) = node.floor {
+                        return Ok(Hit::Floor(n));
                     }
-                    "select" => {
-                        if let Some(paper_id) = &node.paper_id {
-                            return Ok(Hit::Select {
-                                paper_id: paper_id.clone(),
-                            });
-                        }
-                    }
-                    "link" => {
-                        if let Some(href) = &node.href {
-                            return Ok(Hit::Link {
-                                href: href.clone(),
-                            });
-                        }
-                    }
-                    _ => {}
                 }
+                "select" => {
+                    if let Some(paper_id) = &node.paper_id {
+                        return Ok(Hit::Select {
+                            paper_id: paper_id.clone(),
+                        });
+                    }
+                }
+                "link" => {
+                    if let Some(href) = &node.href {
+                        return Ok(Hit::Link {
+                            href: href.clone(),
+                        });
+                    }
+                }
+                _ => {}
             }
         }
     }
